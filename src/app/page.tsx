@@ -1350,6 +1350,7 @@ function PosDashboard({
   const [shiftModalMode, setShiftModalMode] = useState<'open' | 'close' | null>(null);
   const [dismissedRequiredShiftKey, setDismissedRequiredShiftKey] = useState<string | null>(null);
   const layoutBoardRef = useRef<HTMLDivElement>(null);
+  const userMenuRef = useRef<HTMLDivElement>(null);
 
   const shellMode = viewport.appShellMode;
   const isAdmin = currentStaff?.role === 'admin';
@@ -1402,6 +1403,30 @@ function PosDashboard({
     markPackageReminderShown(candidate.id);
   }, [markPackageReminderShown, tables, toast]);
 
+  useEffect(() => {
+    if (!showUserMenu) return;
+
+    const handlePointerDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (userMenuRef.current?.contains(target)) return;
+      setShowUserMenu(false);
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowUserMenu(false);
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('touchstart', handlePointerDown);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('touchstart', handlePointerDown);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [showUserMenu]);
+
   const shellPadding = shellMode === 'wide' ? 'px-6 py-5' : 'px-4 py-4';
 
   const openCafeOrder = () => {
@@ -1453,18 +1478,6 @@ function PosDashboard({
           }}
         />
       )}
-
-      <AnimatePresence>
-        {showUserMenu && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-40"
-            onClick={() => setShowUserMenu(false)}
-          />
-        )}
-      </AnimatePresence>
 
       <div className="mx-auto flex h-full w-full max-w-[1680px] flex-col overflow-hidden rounded-[36px] border border-white/80 bg-white/94 shadow-[0_36px_120px_rgba(15,23,42,0.18)] backdrop-blur dark:border-white/10 dark:bg-slate-950/90">
         <header className={cn('border-b border-white/70 dark:border-white/10', shellPadding)}>
@@ -1526,7 +1539,7 @@ function PosDashboard({
                 </TabletActionButton>
               )}
 
-              <div className="relative">
+              <div ref={userMenuRef} className="relative">
                 <button
                   type="button"
                   onClick={() => setShowUserMenu((current) => !current)}

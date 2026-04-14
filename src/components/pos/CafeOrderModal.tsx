@@ -13,6 +13,7 @@ import {
   Trash2,
   CheckCircle2,
   ChevronRight,
+  Save,
   Users,
   ScanQrCode,
   UtensilsCrossed,
@@ -173,6 +174,11 @@ export default function CafeOrderModal() {
       setShowPayment(false);
       return;
     }
+    setActiveOpenBillId(null);
+  };
+
+  const handleSaveDraft = () => {
+    if (showPayment || lastOrder) return;
     setActiveOpenBillId(null);
   };
 
@@ -804,6 +810,15 @@ export default function CafeOrderModal() {
               className="w-full rounded-xl bg-red-100 px-4 py-3 text-sm font-semibold text-red-600 transition-colors hover:bg-red-200 dark:bg-red-500/15 dark:text-red-400 dark:hover:bg-red-500/25 sm:w-auto"
             >
               Hapus Open Bill
+            </button>
+            <button
+              onClick={handleSaveDraft}
+              className="w-full rounded-xl bg-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-300 dark:bg-white/10 dark:text-slate-200 dark:hover:bg-white/20 sm:w-auto"
+            >
+              <span className="inline-flex items-center gap-2">
+                <Save className="h-4 w-4" />
+                Save Draft Bill
+              </span>
             </button>
             <button
               onClick={handleOpenPayment}
