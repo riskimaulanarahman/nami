@@ -43,7 +43,7 @@ interface TableCardProps {
 }
 
 export default function TableCard({ table, compact = false }: TableCardProps) {
-  const { setActiveModalTableId, formatElapsed, calculateTableBill, activeCashierShift } = usePos();
+  const { setActiveModalTableId, formatElapsed, calculateTableBill, activeCashierShift, openBills } = usePos();
   const config = statusTone[table.status];
   const bill = table.status === 'occupied' ? calculateTableBill(table) : null;
   const isCarryover = Boolean(
@@ -55,6 +55,19 @@ export default function TableCard({ table, compact = false }: TableCardProps) {
   const carryoverLabel = table.originStaffName
     ? `Lanjutan dari ${table.originStaffName}`
     : 'Transaksi shift sebelumnya';
+
+  const totalOrderItems = React.useMemo(() => {
+    const billiardCount = table.orders.length;
+    let openBillCount = 0;
+    if (table.activeOpenBillId) {
+      const linkedBill = openBills.find((b) => b.id === table.activeOpenBillId);
+      const linkedGroup = linkedBill?.groups.find((g) => g.tableId === table.id);
+      if (linkedGroup) {
+        openBillCount = linkedGroup.items.length;
+      }
+    }
+    return billiardCount + openBillCount;
+  }, [table, openBills]);
 
   if (compact) {
     return (
@@ -185,7 +198,7 @@ export default function TableCard({ table, compact = false }: TableCardProps) {
               <div className="text-right text-xs text-slate-500 dark:text-slate-400">
                 <div className="flex items-center gap-1.5">
                   <UtensilsCrossed className="h-3.5 w-3.5" />
-                  {table.orders.length} pesanan
+                  {totalOrderItems} pesanan
                 </div>
                 <div className="mt-2 flex items-center gap-1.5">
                   <Timer className="h-3.5 w-3.5" />

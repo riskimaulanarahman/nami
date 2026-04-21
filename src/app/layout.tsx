@@ -3,10 +3,10 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 
 export const metadata: Metadata = {
-  title: "Rumah Billiard & Cafe - POS System",
-  description: "Point of Sale system untuk Rumah Billiard & Cafe. Kelola meja billiard, pesanan cafe, dan tagihan dengan mudah.",
+  title: "TOGA POS - Point of Sale System Premium",
+  description: "Point of Sale system modern untuk Billiard & Cafe. Kelola operasional lebih cerdas.",
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/favicon.ico",
   },
 };
 

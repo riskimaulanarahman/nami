@@ -5,12 +5,10 @@ import { motion, AnimatePresence, type Variants } from 'framer-motion';
 import {
   X,
   Play,
-  ShoppingBag,
   Receipt,
   Clock,
   CreditCard,
   Crown,
-  Search,
   Timer,
   CheckCircle2,
   Printer,
@@ -19,10 +17,9 @@ import {
 import { cn } from '@/lib/utils';
 import { usePos } from '@/context/PosContext';
 import { useAuth } from '@/context/AuthContext';
+import { useToast } from '@/hooks/use-toast';
 import type { BilliardBillingMode, OrderHistory, PaymentOption } from '@/context/PosContext';
 import PrintReceipt from './PrintReceipt';
-import MenuList from './MenuList';
-import OrderSummary from './OrderSummary';
 
 // ============================================================
 // Overlay & Modal Animation Variants
@@ -67,6 +64,7 @@ function formatRupiah(amount: number): string {
 export default function ActionModal() {
   const {
     tables,
+    openBills,
     activeModalTableId,
     setActiveModalTableId,
     startSession,
@@ -74,7 +72,6 @@ export default function ActionModal() {
     endSessionWithHistory,
     formatElapsed,
     calculateTableBill,
-    updateOrderItemQuantity,
     canTransact,
     activeCashierShift,
     settings,
@@ -84,11 +81,9 @@ export default function ActionModal() {
   } = usePos();
 
   const { currentStaff } = useAuth();
+  const { toast } = useToast();
 
-  const [activeTab, setActiveTab] = useState<'order' | 'bill'>('order');
-  const [searchQuery, setSearchQuery] = useState('');
   const [showPayment, setShowPayment] = useState(false);
-  const [showSuccess, setShowSuccess] = useState(false);
   const [lastOrder, setLastOrder] = useState<OrderHistory | null>(null);
   const [selectedPayment, setSelectedPayment] = useState<PaymentOption | null>(null);
   const [paymentRef, setPaymentRef] = useState('');
@@ -97,9 +92,10 @@ export default function ActionModal() {
   const [selectedBillingMode, setSelectedBillingMode] = useState<BilliardBillingMode>('open-bill');
   const [selectedPackageId, setSelectedPackageId] = useState('');
   const [expandedPaymentId, setExpandedPaymentId] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const table = tables.find((t) => t.id === activeModalTableId);
-  const isOpen = activeModalTableId !== null && !showSuccess && !lastOrder;
+  const isOpen = activeModalTableId !== null && !lastOrder;
   const isCarryoverTransaction = Boolean(
     table &&
     table.status === 'occupied' &&
@@ -111,9 +107,6 @@ export default function ActionModal() {
   // Reset internal state when a new table is opened
   useEffect(() => {
     if (activeModalTableId !== null) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setActiveTab('order');
-      setSearchQuery('');
       setShowPayment(false);
       setShowCancelConfirm(false);
       setSelectedPayment(null);
@@ -122,10 +115,12 @@ export default function ActionModal() {
       setSelectedBillingMode('open-bill');
       setSelectedPackageId(activeBilliardPackages[0]?.id ?? '');
       setExpandedPaymentId(null);
+      setIsSubmitting(false);
     }
   }, [activeModalTableId]);
 
   const handleClose = () => {
+    if (isSubmitting) return;
     if (showCancelConfirm) { setShowCancelConfirm(false); return; }
     if (showPayment) { setShowPayment(false); return; }
     setActiveModalTableId(null);
@@ -142,6 +137,7 @@ export default function ActionModal() {
   };
 
   const handleOpenPayment = () => {
+    if (isSubmitting) return;
     setShowPayment(true);
     setSelectedPayment(null);
     setPaymentRef('');
@@ -149,25 +145,46 @@ export default function ActionModal() {
     setExpandedPaymentId(null);
   };
 
-  const handleConfirmPayment = () => {
+  const handleConfirmPayment = async () => {
     if (activeModalTableId === null || !selectedPayment || !currentStaff) return;
     if (!canTransact) {
       setPinError('Buka shift kasir terlebih dahulu untuk memproses pembayaran.');
       return;
     }
-    if (selectedPayment.requiresReference && !paymentRef.trim()) return;
+    if (selectedPayment.requiresReference && !paymentRef.trim()) {
+      setPinError(`${selectedPayment.referenceLabel} wajib diisi`);
+      return;
+    }
 
     const ref = selectedPayment.requiresReference ? paymentRef.trim() : null;
-    const history = endSessionWithHistory(
-      activeModalTableId,
-      { id: currentStaff.id, name: currentStaff.name },
-      selectedPayment.id, resolvePaymentMethodName(selectedPayment), ref
-    );
-    setShowPayment(false);
-    setLastOrder(history);
+    setIsSubmitting(true);
+    setPinError('');
+
+    try {
+      const history = await endSessionWithHistory(
+        activeModalTableId,
+        { id: currentStaff.id, name: currentStaff.name },
+        selectedPayment.id,
+        resolvePaymentMethodName(selectedPayment),
+        ref
+      );
+      setShowPayment(false);
+      setLastOrder(history);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Terjadi kesalahan sistem saat memproses pembayaran.';
+      setPinError(message);
+      toast({
+        title: 'Checkout Gagal',
+        description: message,
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleCancelSession = () => {
+    if (isSubmitting) return;
     if (activeModalTableId !== null) {
       endSession(activeModalTableId);
     }
@@ -198,12 +215,27 @@ export default function ActionModal() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [lastOrder]);
 
+  // Merge table orders and open bill items (must be before early returns to respect Rules of Hooks)
+  const allOrders = React.useMemo(() => {
+    if (!table) return [];
+    
+    const billiardOrders = table.orders;
+    
+    let openBillOrders: typeof table.orders = [];
+    if (table.activeOpenBillId) {
+      const linkedBill = openBills.find((b) => b.id === table.activeOpenBillId);
+      const linkedGroup = linkedBill?.groups.find((g) => g.tableId === table.id);
+      if (linkedGroup) {
+        openBillOrders = linkedGroup.items;
+      }
+    }
+    
+    return [...billiardOrders, ...openBillOrders];
+  }, [table, openBills]);
+
   if (!table && !lastOrder) return null;
 
   const bill = table?.status === 'occupied' ? calculateTableBill(table) : null;
-  const orderQuantityByItemId = table
-    ? Object.fromEntries(table.orders.map((order) => [order.menuItem.id, order.quantity]))
-    : {};
   const isVip = table?.type === 'vip';
   const selectedPackage = activeBilliardPackages.find((pkg) => pkg.id === selectedPackageId) ?? null;
   const canStartSession = selectedBillingMode === 'open-bill' || Boolean(selectedPackage);
@@ -345,7 +377,8 @@ export default function ActionModal() {
                         <p className="text-xs text-muted-foreground mt-0.5">Pilih metode pembayaran customer</p>
                       </div>
                       <button
-                        onClick={() => setShowPayment(false)}
+                        onClick={() => { if (!isSubmitting) setShowPayment(false); }}
+                        disabled={isSubmitting}
                         className="h-8 w-8 rounded-lg bg-gray-100 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/20 flex items-center justify-center transition-colors"
                       >
                         <X className="h-4 w-4 text-foreground" />
@@ -370,7 +403,9 @@ export default function ActionModal() {
                           <motion.button
                             whileHover={{ scale: 1.01 }}
                             whileTap={{ scale: 0.98 }}
+                            disabled={isSubmitting}
                             onClick={() => {
+                              if (isSubmitting) return;
                               if (pm.isGroup) {
                                 setExpandedPaymentId((prev) => prev === pm.id ? null : pm.id);
                                 setSelectedPayment(null);
@@ -412,7 +447,9 @@ export default function ActionModal() {
                                 return (
                                   <button
                                     key={child.id}
+                                    disabled={isSubmitting}
                                     onClick={() => {
+                                      if (isSubmitting) return;
                                       setSelectedPayment(child);
                                       setPaymentRef('');
                                       setPinError('');
@@ -451,6 +488,7 @@ export default function ActionModal() {
                           <input
                             type="text"
                             value={paymentRef}
+                            disabled={isSubmitting}
                             onChange={(e) => { setPaymentRef(e.target.value); setPinError(''); }}
                             placeholder={selectedPayment.referenceLabel}
                             className="w-full rounded-lg bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all"
@@ -460,6 +498,12 @@ export default function ActionModal() {
                       </motion.div>
                     )}
                   </AnimatePresence>
+
+                  {pinError && !selectedPayment?.requiresReference && (
+                    <div className="px-4 pb-3">
+                      <p className="text-xs text-red-500">{pinError}</p>
+                    </div>
+                  )}
 
                   {/* Confirm button */}
                   <div className="px-4 pb-4">
@@ -475,7 +519,7 @@ export default function ActionModal() {
                         setPinError('');
                         handleConfirmPayment();
                       }}
-                      disabled={!selectedPayment}
+                      disabled={!selectedPayment || isSubmitting}
                       className={cn(
                         'w-full py-3 rounded-xl font-bold text-base transition-all',
                         'bg-gradient-to-r from-emerald-600 to-emerald-500',
@@ -486,7 +530,7 @@ export default function ActionModal() {
                       )}
                     >
                       <CreditCard className="h-5 w-5" />
-                      KONFIRMASI PEMBAYARAN
+                      {isSubmitting ? 'MEMPROSES...' : 'KONFIRMASI PEMBAYARAN'}
                     </motion.button>
                   </div>
                 </motion.div>
@@ -636,27 +680,29 @@ export default function ActionModal() {
             </div>
 
             {/* Body */}
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-              {(table.status === 'available' || table.status === 'reserved') ? (
-                <div className="flex flex-col items-center justify-center py-12 px-6">
-                  <motion.div
-                    initial={{ scale: 0 }}
-                    animate={{ scale: 1 }}
-                    transition={{ type: 'spring', stiffness: 200, damping: 15, delay: 0.2 }}
-                    className="w-24 h-24 rounded-full bg-emerald-50 dark:bg-emerald-500/10 border-2 border-dashed border-emerald-300 dark:border-emerald-500/30 flex items-center justify-center mb-6"
-                  >
-                    <Play className="h-10 w-10 text-emerald-600 dark:text-emerald-400 ml-1" />
-                  </motion.div>
+            <div className="grid min-h-0 flex-1 gap-4 p-4 lg:grid-cols-[1.05fr_0.95fr]">
+              <div className="flex min-h-0 flex-col rounded-[22px] border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
+                {(table.status === 'available' || table.status === 'reserved') ? (
+                  <div className="space-y-4">
+                    <div className="text-center">
+                      <motion.div
+                        initial={{ scale: 0 }}
+                        animate={{ scale: 1 }}
+                        transition={{ type: 'spring', stiffness: 200, damping: 15, delay: 0.2 }}
+                        className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full border-2 border-dashed border-emerald-300 bg-emerald-50 dark:border-emerald-500/30 dark:bg-emerald-500/10"
+                      >
+                        <Play className="ml-1 h-8 w-8 text-emerald-600 dark:text-emerald-400" />
+                      </motion.div>
+                      <h3 className="text-xl font-bold text-foreground">
+                        {table.status === 'reserved' ? 'Pilih Mode Billing' : 'Meja Tersedia'}
+                      </h3>
+                      <p className="mx-auto mt-1 max-w-lg text-sm text-muted-foreground">
+                        {table.status === 'reserved'
+                          ? 'Meja ini sudah di-assign dari waiting list. Pilih mode billing sebelum sesi dimulai.'
+                          : `Mulai sesi billiard untuk ${table.name} dengan mode billing yang sesuai.`}
+                      </p>
+                    </div>
 
-                  <h3 className="text-xl font-bold text-foreground mb-2">
-                    {table.status === 'reserved' ? 'Pilih Mode Billing' : 'Meja Tersedia'}
-                  </h3>
-                  <p className="text-sm text-muted-foreground text-center max-w-sm mb-4">
-                    {table.status === 'reserved'
-                      ? `Meja ini sudah di-assign dari waiting list. Pilih Open Bill / Prorata atau Paket Jam sebelum sesi dimulai.`
-                      : `Mulai sesi billiard untuk ${table.name} dengan mode billing yang sesuai.`}
-                  </p>
-                  <div className="w-full max-w-2xl space-y-4">
                     <div className="grid grid-cols-2 gap-3">
                       <button
                         onClick={() => setSelectedBillingMode('open-bill')}
@@ -664,7 +710,7 @@ export default function ActionModal() {
                           'rounded-2xl border p-4 text-left transition-all',
                           selectedBillingMode === 'open-bill'
                             ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-500/10'
-                            : 'border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/5'
+                            : 'border-gray-200 bg-white dark:border-white/10 dark:bg-white/5'
                         )}
                       >
                         <div className="flex items-center gap-2">
@@ -672,7 +718,7 @@ export default function ActionModal() {
                           <p className="font-bold text-foreground">Open Bill / Prorata</p>
                         </div>
                         <p className="mt-2 text-sm text-muted-foreground">
-                          Billing berjalan berdasarkan waktu main aktual dengan tarif {formatRupiah(table.hourlyRate)}/jam.
+                          Billing mengikuti waktu main aktual dengan tarif {formatRupiah(table.hourlyRate)}/jam.
                         </p>
                       </button>
                       <button
@@ -681,7 +727,7 @@ export default function ActionModal() {
                           'rounded-2xl border p-4 text-left transition-all',
                           selectedBillingMode === 'package'
                             ? 'border-blue-400 bg-blue-50 dark:bg-blue-500/10'
-                            : 'border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/5'
+                            : 'border-gray-200 bg-white dark:border-white/10 dark:bg-white/5'
                         )}
                       >
                         <div className="flex items-center gap-2">
@@ -689,19 +735,19 @@ export default function ActionModal() {
                           <p className="font-bold text-foreground">Paket Jam</p>
                         </div>
                         <p className="mt-2 text-sm text-muted-foreground">
-                          Pilih paket global dari admin. Harga tetap dan tidak dihitung prorata saat checkout.
+                          Pilih paket global dari admin dengan harga tetap.
                         </p>
                       </button>
                     </div>
 
                     {selectedBillingMode === 'package' && (
-                      <div className="rounded-2xl border border-blue-200 dark:border-blue-500/20 bg-blue-50 dark:bg-blue-500/10 p-4 space-y-3">
+                      <div className="space-y-3 rounded-2xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-500/20 dark:bg-blue-500/10">
                         <div>
                           <p className="text-sm font-bold text-foreground">Paket Aktif</p>
-                          <p className="text-xs text-muted-foreground">Pilih paket jam yang ingin dipakai untuk sesi ini.</p>
+                          <p className="text-xs text-muted-foreground">Pilih paket jam untuk sesi ini.</p>
                         </div>
                         {activeBilliardPackages.length === 0 ? (
-                          <div className="rounded-xl bg-white/80 dark:bg-gray-950/50 px-4 py-3 text-sm text-muted-foreground">
+                          <div className="rounded-xl bg-white/80 px-4 py-3 text-sm text-muted-foreground dark:bg-gray-950/50">
                             Belum ada paket aktif. Aktifkan paket dari admin terlebih dahulu.
                           </div>
                         ) : (
@@ -714,7 +760,7 @@ export default function ActionModal() {
                                   'w-full rounded-xl border px-4 py-3 text-left transition-all',
                                   selectedPackageId === pkg.id
                                     ? 'border-blue-400 bg-white dark:bg-gray-950'
-                                    : 'border-blue-100 dark:border-blue-500/15 bg-white/70 dark:bg-white/5'
+                                    : 'border-blue-100 bg-white/70 dark:border-blue-500/15 dark:bg-white/5'
                                 )}
                               >
                                 <div className="flex items-center justify-between gap-3">
@@ -737,11 +783,9 @@ export default function ActionModal() {
                       onClick={handleStartSession}
                       disabled={!canStartSession}
                       className={cn(
-                        'w-full px-8 py-4 rounded-xl font-bold text-base transition-all',
-                        'bg-gradient-to-r from-emerald-600 to-emerald-500',
-                        'hover:from-emerald-500 hover:to-emerald-400',
-                        'text-white shadow-lg shadow-emerald-500/20',
-                        'flex flex-col items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed'
+                        'flex w-full flex-col items-center gap-2 rounded-xl px-8 py-4 text-base font-bold text-white transition-all',
+                        'bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400',
+                        'shadow-lg shadow-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50'
                       )}
                     >
                       <Timer className="h-6 w-6" />
@@ -755,103 +799,94 @@ export default function ActionModal() {
                       </span>
                     </motion.button>
                   </div>
-                </div>
-              ) : (
-                <div className="flex min-h-0 flex-1 flex-col">
-                  {/* Tab Navigation */}
-                  <div className="flex-shrink-0 flex border-b border-gray-200 dark:border-white/10 px-4 pt-2">
-                    <button
-                      onClick={() => setActiveTab('order')}
-                      className={cn(
-                        'flex items-center gap-2 px-4 py-3 text-sm font-semibold transition-all relative',
-                        activeTab === 'order'
-                          ? 'text-emerald-600 dark:text-emerald-400'
-                          : 'text-muted-foreground hover:text-foreground'
-                      )}
-                    >
-                      <ShoppingBag className="h-4 w-4" />
-                      Tambah Pesanan
-                      {activeTab === 'order' && (
-                        <motion.div
-                          layoutId="activeTab"
-                          className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-500 dark:bg-emerald-400 rounded-full"
-                        />
-                      )}
-                    </button>
-                    <button
-                      onClick={() => setActiveTab('bill')}
-                      className={cn(
-                        'flex items-center gap-2 px-4 py-3 text-sm font-semibold transition-all relative',
-                        activeTab === 'bill'
-                          ? 'text-amber-600 dark:text-amber-400'
-                          : 'text-muted-foreground hover:text-foreground'
-                      )}
-                    >
-                      <Receipt className="h-4 w-4" />
-                      Detail Tagihan
-                      {activeTab === 'bill' && (
-                        <motion.div
-                          layoutId="activeTab"
-                          className="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-500 dark:bg-amber-400 rounded-full"
-                        />
-                      )}
-                    </button>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-slate-950/80">
+                      <p className="text-sm font-bold text-foreground">Kontrol Sesi Billiard</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Pengelolaan item F&B dipusatkan di tab <span className="font-semibold">Orders</span>.
+                      </p>
+                    </div>
+                    {bill && (
+                      <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-500/20 dark:bg-amber-500/10">
+                        <div className="flex justify-between text-sm text-muted-foreground">
+                          <span>Subtotal sewa meja</span>
+                          <span>{formatRupiah(bill.rentalCost)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm text-muted-foreground">
+                          <span>Subtotal pesanan</span>
+                          <span>{formatRupiah(bill.orderTotal)}</span>
+                        </div>
+                        <div className="flex justify-between border-t border-amber-200 pt-2 text-base font-bold text-foreground dark:border-amber-500/20">
+                          <span>Total saat ini</span>
+                          <span>{formatRupiah(bill.grandTotal)}</span>
+                        </div>
+                      </div>
+                    )}
                   </div>
+                )}
+              </div>
 
-                  {/* Tab Content */}
-                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3">
-                    <AnimatePresence mode="wait">
-                      {activeTab === 'order' ? (
-                        <motion.div
-                          key="order"
-                          initial={{ opacity: 0, y: 10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: -10 }}
-                          transition={{ duration: 0.2 }}
-                          className="flex min-h-0 flex-1 flex-col overflow-hidden"
-                        >
-                          <div className="relative mb-4">
-                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                            <input
-                              type="text"
-                              placeholder="Cari menu..."
-                              value={searchQuery}
-                              onChange={(e) => setSearchQuery(e.target.value)}
-                              className="w-full rounded-lg bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 py-2.5 pl-10 pr-4 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500/50 transition-all"
-                            />
-                          </div>
-
-                          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y pr-1 pb-2 [-webkit-overflow-scrolling:touch]">
-                            <MenuList
-                              tableId={table.id}
-                              searchQuery={searchQuery}
-                              quantityByItemId={orderQuantityByItemId}
-                              accent="emerald"
-                              onDecrease={(item) => {
-                                const quantity = orderQuantityByItemId[item.id] ?? 0;
-                                updateOrderItemQuantity(table.id, item.id, quantity - 1);
-                              }}
-                            />
-                          </div>
-                        </motion.div>
-                      ) : (
-                        <motion.div
-                          key="bill"
-                          initial={{ opacity: 0, y: 10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: -10 }}
-                          transition={{ duration: 0.2 }}
-                          className="flex min-h-0 flex-1 flex-col overflow-hidden"
-                        >
-                          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y pr-1 pb-[7.5rem] sm:pb-[7rem] [-webkit-overflow-scrolling:touch]">
-                            <OrderSummary table={table} />
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </div>
+              <div className="flex min-h-0 flex-col rounded-[22px] border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
+                <div className="mb-3">
+                  <p className="text-sm font-bold text-foreground">Cart Meja</p>
+                  <p className="text-xs text-muted-foreground">
+                    {table.status === 'occupied'
+                      ? 'Read-only dari transaksi yang sedang berjalan.'
+                      : 'Cart akan tampil setelah sesi berjalan dan item ditambahkan dari tab Orders.'}
+                  </p>
                 </div>
-              )}
+
+                {table.status !== 'occupied' ? (
+                  <div className="flex min-h-[220px] flex-1 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white px-4 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-slate-950/80 dark:text-slate-400">
+                    Belum ada cart aktif untuk meja ini. Mulai sesi billiard terlebih dahulu.
+                  </div>
+                ) : allOrders.length === 0 ? (
+                  <div className="flex min-h-[220px] flex-1 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white px-4 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-slate-950/80 dark:text-slate-400">
+                    Tidak ada item F&B pada sesi ini. Tambahkan dari tab Orders jika diperlukan.
+                  </div>
+                ) : (
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                      {allOrders.map((order, index) => (
+                        <div
+                          key={`${order.menuItem.id}-${index}`}
+                          className="grid grid-cols-[minmax(0,1fr)_auto_92px] items-center gap-2 rounded-lg bg-white px-3 py-2.5 dark:bg-slate-950/80"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-foreground">
+                              {order.menuItem.emoji} {order.menuItem.name}
+                            </p>
+                            <p className="text-xs text-muted-foreground">{formatRupiah(order.menuItem.price)} / item</p>
+                          </div>
+                          <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-bold text-slate-700 dark:bg-white/10 dark:text-slate-200">
+                            x{order.quantity}
+                          </span>
+                          <p className="text-right text-sm font-bold text-foreground">
+                            {formatRupiah(order.menuItem.price * order.quantity)}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                    {bill && (
+                      <div className="mt-3 space-y-1.5 rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-500/20 dark:bg-amber-500/10">
+                        <div className="flex justify-between text-sm text-muted-foreground">
+                          <span>Sewa meja</span>
+                          <span>{formatRupiah(bill.rentalCost)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm text-muted-foreground">
+                          <span>Pesanan F&B</span>
+                          <span>{formatRupiah(bill.orderTotal)}</span>
+                        </div>
+                        <div className="flex justify-between border-t border-amber-200 pt-2 text-base font-bold text-foreground dark:border-amber-500/20">
+                          <span>Total akhir</span>
+                          <span>{formatRupiah(bill.grandTotal)}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Footer (only for occupied) */}

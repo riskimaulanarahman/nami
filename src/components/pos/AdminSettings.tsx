@@ -1,11 +1,12 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Plus, Printer, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react';
+import { ChefHat, Plus, Printer, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react';
 import type { BusinessSettings, OrderHistory } from '@/context/PosContext';
 import { usePos } from '@/context/PosContext';
+import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
-import { printReceiptDirect } from './PrintReceipt';
+import { printReceiptDirect, printKitchenReceiptFromOrder } from './PrintReceipt';
 import {
   TabletActionButton,
   TabletChip,
@@ -47,6 +48,7 @@ export default function AdminSettings() {
     deleteBilliardPackage,
     members,
   } = usePos();
+  const { toast } = useToast();
 
   const [activeTab, setActiveTab] = useState<SettingsTab>('business');
   const [newPayName, setNewPayName] = useState('');
@@ -59,6 +61,10 @@ export default function AdminSettings() {
   const [newPackagePrice, setNewPackagePrice] = useState(45000);
   const [form, setForm] = useState<BusinessSettings>(settings);
   const [saveStatus, setSaveStatus] = useState<'saving' | 'saved'>('saved');
+  const [paymentError, setPaymentError] = useState('');
+  const [packageError, setPackageError] = useState('');
+  const [paymentDeleteConfirm, setPaymentDeleteConfirm] = useState<string | null>(null);
+  const [packageDeleteConfirm, setPackageDeleteConfirm] = useState<string | null>(null);
 
   const autoSaveInitRef = useRef(true);
 
@@ -208,6 +214,148 @@ export default function AdminSettings() {
     };
 
     printReceiptDirect(testOrder, form, form.paperSize);
+  };
+
+  const handlePrintKitchenTest = () => {
+    const now = new Date();
+    const testOrder: OrderHistory = {
+      id: 'test-kitchen',
+      tableId: 1,
+      tableName: 'TEST DAPUR',
+      tableType: 'standard',
+      sessionType: 'cafe',
+      billType: 'open-bill',
+      billiardBillingMode: null,
+      startTime: now,
+      endTime: now,
+      durationMinutes: 0,
+      sessionDurationHours: 0,
+      rentalCost: 0,
+      selectedPackageId: null,
+      selectedPackageName: null,
+      selectedPackageHours: 0,
+      selectedPackagePrice: 0,
+      orders: [],
+      groups: [
+        {
+          id: 'g1',
+          fulfillmentType: 'dine-in',
+          tableId: 1,
+          tableName: 'Meja 1',
+          items: [
+            { menuItem: { id: 'd2', name: 'Kopi Susu', category: 'drink', categoryId: '', cost: 0, recipe: [], isAvailable: true, price: 15000, emoji: '☕', description: '' }, quantity: 2, subtotal: 30000, note: 'tanpa gula' },
+            { menuItem: { id: 'f1', name: 'Nasi Goreng', category: 'food', categoryId: '', cost: 0, recipe: [], isAvailable: true, price: 20000, emoji: '🍳', description: '' }, quantity: 1, subtotal: 20000 },
+          ],
+          subtotal: 50000,
+        },
+      ],
+      orderTotal: 50000,
+      grandTotal: 50000,
+      orderCost: 0,
+      servedBy: 'Admin',
+      status: 'completed',
+      refundedAt: null,
+      refundedBy: null,
+      refundReason: null,
+      paymentMethodId: null,
+      paymentMethodName: null,
+      paymentMethodType: 'cash',
+      paymentReference: null,
+      cashierShiftId: null,
+      refundedInCashierShiftId: null,
+      originCashierShiftId: null,
+      originStaffId: null,
+      originStaffName: null,
+      involvedStaffIds: [],
+      involvedStaffNames: [],
+      isContinuedFromPreviousShift: false,
+      memberId: null,
+      memberCode: null,
+      memberName: null,
+      pointsEarned: 0,
+      pointsRedeemed: 0,
+      redeemAmount: 0,
+      createdAt: now,
+    };
+    printKitchenReceiptFromOrder(testOrder, form, form.printerSettings?.kitchen?.paperSize ?? '58mm');
+  };
+
+  const handleAddPaymentOption = () => {
+    if (!newPayName.trim()) {
+      const message = 'Nama metode pembayaran wajib diisi.';
+      setPaymentError(message);
+      toast({ title: 'Metode pembayaran belum lengkap', description: message, variant: 'destructive' });
+      return;
+    }
+    if (!newPayIcon.trim()) {
+      const message = 'Emoji / ikon metode pembayaran wajib diisi.';
+      setPaymentError(message);
+      toast({ title: 'Metode pembayaran belum lengkap', description: message, variant: 'destructive' });
+      return;
+    }
+    if (newPayRef && newPayType !== 'qris' && !newPayRefLabel.trim()) {
+      const message = 'Label reference wajib diisi jika metode membutuhkan reference.';
+      setPaymentError(message);
+      toast({ title: 'Metode pembayaran belum lengkap', description: message, variant: 'destructive' });
+      return;
+    }
+
+    addPaymentOption({
+      name: newPayName.trim(),
+      icon: newPayIcon.trim(),
+      type: newPayType,
+      isActive: true,
+      requiresReference: newPayType === 'qris' ? false : newPayRef,
+      referenceLabel: newPayType === 'qris' ? '' : newPayRefLabel.trim(),
+      parentId: newPayType === 'qris' ? (qrisParent?.id ?? 'pm-qris') : null,
+      isGroup: false,
+    });
+    toast({
+      title: 'Metode pembayaran ditambahkan',
+      description: `${newPayName.trim()} berhasil ditambahkan.`,
+    });
+    setNewPayName('');
+    setNewPayIcon('');
+    setNewPayType('cash');
+    setNewPayRef(false);
+    setNewPayRefLabel('');
+    setPaymentError('');
+  };
+
+  const handleAddPackage = () => {
+    if (!newPackageName.trim()) {
+      const message = 'Nama paket wajib diisi.';
+      setPackageError(message);
+      toast({ title: 'Paket belum lengkap', description: message, variant: 'destructive' });
+      return;
+    }
+    if (newPackageHours <= 0) {
+      const message = 'Durasi paket harus lebih dari 0 jam.';
+      setPackageError(message);
+      toast({ title: 'Paket belum valid', description: message, variant: 'destructive' });
+      return;
+    }
+    if (newPackagePrice < 0) {
+      const message = 'Harga paket tidak boleh negatif.';
+      setPackageError(message);
+      toast({ title: 'Paket belum valid', description: message, variant: 'destructive' });
+      return;
+    }
+
+    addBilliardPackage({
+      name: newPackageName.trim(),
+      durationHours: newPackageHours,
+      price: newPackagePrice,
+      isActive: true,
+    });
+    toast({
+      title: 'Paket ditambahkan',
+      description: `${newPackageName.trim()} berhasil ditambahkan.`,
+    });
+    setNewPackageName('');
+    setNewPackageHours(2);
+    setNewPackagePrice(45000);
+    setPackageError('');
   };
 
   return (
@@ -379,6 +527,86 @@ export default function AdminSettings() {
                   </div>
                 </div>
               </div>
+
+              <div className="space-y-3 rounded-[16px] bg-slate-50 p-4 dark:bg-white/5">
+                <div>
+                  <p className="text-sm font-bold text-slate-950 dark:text-white">Mode Cetak</p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    Aktifkan mode struk kasir dan/atau dapur. Tiap mode bisa pakai ukuran kertas berbeda.
+                  </p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {([
+                    { mode: 'cashier' as const, label: 'Struk Kasir', icon: <Printer className="h-4 w-4" />, color: 'blue' },
+                    { mode: 'kitchen' as const, label: 'Struk Dapur', icon: <ChefHat className="h-4 w-4" />, color: 'orange' },
+                  ] as const).map(({ mode, label, icon }) => {
+                    const modeSettings = form.printerSettings?.[mode] ?? { enabled: mode === 'cashier', paperSize: mode === 'cashier' ? '80mm' : '58mm' };
+                    return (
+                      <div key={mode} className="rounded-[12px] border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-slate-950/60">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-500 dark:text-slate-400">{icon}</span>
+                            <p className="text-sm font-bold text-slate-950 dark:text-white">{label}</p>
+                          </div>
+                          <button
+                            onClick={() =>
+                              updateFormDraft((current) => ({
+                                ...current,
+                                printerSettings: {
+                                  ...current.printerSettings,
+                                  [mode]: { ...modeSettings, enabled: !modeSettings.enabled },
+                                },
+                              }))
+                            }
+                            className={cn(
+                              'flex h-7 w-7 items-center justify-center rounded-lg transition-colors',
+                              modeSettings.enabled
+                                ? 'bg-slate-950 text-white dark:bg-white dark:text-slate-950'
+                                : 'bg-slate-200 text-slate-500 dark:bg-white/10 dark:text-slate-400'
+                            )}
+                          >
+                            {modeSettings.enabled ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
+                          </button>
+                        </div>
+                        <div>
+                          <label className={labelClass}>Ukuran Kertas</label>
+                          <div className="flex gap-2">
+                            {(['58mm', '80mm'] as const).map((size) => (
+                              <button
+                                key={size}
+                                onClick={() =>
+                                  updateFormDraft((current) => ({
+                                    ...current,
+                                    printerSettings: {
+                                      ...current.printerSettings,
+                                      [mode]: { ...modeSettings, paperSize: size },
+                                    },
+                                  }))
+                                }
+                                className={cn(
+                                  'flex-1 rounded-lg border py-1.5 text-xs font-semibold transition-colors',
+                                  modeSettings.paperSize === size
+                                    ? 'border-slate-950 bg-slate-950 text-white dark:border-white dark:bg-white dark:text-slate-950'
+                                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-white/10 dark:bg-white/5 dark:text-slate-400'
+                                )}
+                              >
+                                {size}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <button
+                          onClick={mode === 'cashier' ? handlePrintTest : handlePrintKitchenTest}
+                          className="mt-3 w-full flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-400 dark:hover:bg-white/10"
+                        >
+                          {icon}
+                          Test Print {label}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </TabletPanel>
           )}
 
@@ -421,7 +649,13 @@ export default function AdminSettings() {
                             </p>
                           </div>
                           <button
-                            onClick={() => updatePaymentOption(payment.id, { isActive: !payment.isActive })}
+                            onClick={() => {
+                              updatePaymentOption(payment.id, { isActive: !payment.isActive });
+                              toast({
+                                title: payment.isActive ? 'Metode dinonaktifkan' : 'Metode diaktifkan',
+                                description: `${payment.name} sekarang ${payment.isActive ? 'nonaktif' : 'aktif'}.`,
+                              });
+                            }}
                             className={cn(
                               'flex h-8 w-8 items-center justify-center rounded-xl transition-colors',
                               payment.isActive
@@ -432,12 +666,36 @@ export default function AdminSettings() {
                             {payment.isActive ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
                           </button>
                           {!payment.isGroup && (
-                            <button
-                              onClick={() => deletePaymentOption(payment.id)}
-                              className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-100 text-rose-600 transition-colors hover:bg-rose-200 dark:bg-rose-500/15 dark:text-rose-300"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
+                            paymentDeleteConfirm === payment.id ? (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => {
+                                    deletePaymentOption(payment.id);
+                                    setPaymentDeleteConfirm(null);
+                                    toast({
+                                      title: 'Metode dihapus',
+                                      description: `${payment.name} berhasil dihapus.`,
+                                    });
+                                  }}
+                                  className="rounded-lg bg-rose-500 px-2 py-1 text-[10px] font-bold text-white"
+                                >
+                                  Ya
+                                </button>
+                                <button
+                                  onClick={() => setPaymentDeleteConfirm(null)}
+                                  className="rounded-lg bg-slate-200 px-2 py-1 text-[10px] font-bold text-slate-700 dark:bg-white/10 dark:text-slate-300"
+                                >
+                                  Batal
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => setPaymentDeleteConfirm(payment.id)}
+                                className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-100 text-rose-600 transition-colors hover:bg-rose-200 dark:bg-rose-500/15 dark:text-rose-300"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            )
                           )}
                         </div>
 
@@ -461,7 +719,13 @@ export default function AdminSettings() {
                                   <p className="text-[11px] text-slate-500 dark:text-slate-400">Sub QRIS</p>
                                 </div>
                                 <button
-                                  onClick={() => updatePaymentOption(child.id, { isActive: !child.isActive })}
+                                  onClick={() => {
+                                    updatePaymentOption(child.id, { isActive: !child.isActive });
+                                    toast({
+                                      title: child.isActive ? 'Sub metode dinonaktifkan' : 'Sub metode diaktifkan',
+                                      description: `${child.name} sekarang ${child.isActive ? 'nonaktif' : 'aktif'}.`,
+                                    });
+                                  }}
                                   className={cn(
                                     'flex h-7 w-7 items-center justify-center rounded-xl transition-colors',
                                     child.isActive
@@ -475,12 +739,36 @@ export default function AdminSettings() {
                                     <ToggleLeft className="h-4 w-4" />
                                   )}
                                 </button>
-                                <button
-                                  onClick={() => deletePaymentOption(child.id)}
-                                  className="flex h-7 w-7 items-center justify-center rounded-xl bg-rose-100 text-rose-600 transition-colors hover:bg-rose-200 dark:bg-rose-500/15 dark:text-rose-300"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
+                                {paymentDeleteConfirm === child.id ? (
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      onClick={() => {
+                                        deletePaymentOption(child.id);
+                                        setPaymentDeleteConfirm(null);
+                                        toast({
+                                          title: 'Sub metode dihapus',
+                                          description: `${child.name} berhasil dihapus.`,
+                                        });
+                                      }}
+                                      className="rounded-lg bg-rose-500 px-1.5 py-1 text-[10px] font-bold text-white"
+                                    >
+                                      Ya
+                                    </button>
+                                    <button
+                                      onClick={() => setPaymentDeleteConfirm(null)}
+                                      className="rounded-lg bg-slate-200 px-1.5 py-1 text-[10px] font-bold text-slate-700 dark:bg-white/10 dark:text-slate-300"
+                                    >
+                                      Batal
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => setPaymentDeleteConfirm(child.id)}
+                                    className="flex h-7 w-7 items-center justify-center rounded-xl bg-rose-100 text-rose-600 transition-colors hover:bg-rose-200 dark:bg-rose-500/15 dark:text-rose-300"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -521,18 +809,29 @@ export default function AdminSettings() {
                     <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
                       QRIS baru otomatis jadi sub opsi di bawah metode induk.
                     </p>
+                    {paymentError ? (
+                      <div className="mt-3 rounded-[12px] border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+                        {paymentError}
+                      </div>
+                    ) : null}
                     <div className="mt-4 space-y-3">
                       <input
                         type="text"
                         value={newPayName}
-                        onChange={(event) => setNewPayName(event.target.value)}
+                        onChange={(event) => {
+                          setNewPayName(event.target.value);
+                          setPaymentError('');
+                        }}
                         placeholder="Nama metode"
                         className={inputClass}
                       />
                       <input
                         type="text"
                         value={newPayIcon}
-                        onChange={(event) => setNewPayIcon(event.target.value)}
+                        onChange={(event) => {
+                          setNewPayIcon(event.target.value);
+                          setPaymentError('');
+                        }}
                         placeholder="Emoji"
                         maxLength={4}
                         className={cn(inputClass, 'text-center text-lg')}
@@ -570,32 +869,17 @@ export default function AdminSettings() {
                         <input
                           type="text"
                           value={newPayRefLabel}
-                          onChange={(event) => setNewPayRefLabel(event.target.value)}
+                          onChange={(event) => {
+                            setNewPayRefLabel(event.target.value);
+                            setPaymentError('');
+                          }}
                           placeholder="Contoh: No. Pesanan Gojek"
                           className={inputClass}
                         />
                       )}
                       <TabletActionButton
                         className="w-full"
-                        disabled={!newPayName.trim() || !newPayIcon.trim()}
-                        onClick={() => {
-                          if (!newPayName.trim() || !newPayIcon.trim()) return;
-                          addPaymentOption({
-                            name: newPayName.trim(),
-                            icon: newPayIcon.trim(),
-                            type: newPayType,
-                            isActive: true,
-                            requiresReference: newPayType === 'qris' ? false : newPayRef,
-                            referenceLabel: newPayType === 'qris' ? '' : newPayRefLabel.trim(),
-                            parentId: newPayType === 'qris' ? (qrisParent?.id ?? 'pm-qris') : null,
-                            isGroup: false,
-                          });
-                          setNewPayName('');
-                          setNewPayIcon('');
-                          setNewPayType('cash');
-                          setNewPayRef(false);
-                          setNewPayRefLabel('');
-                        }}
+                        onClick={handleAddPaymentOption}
                       >
                         <Plus className="h-4 w-4" />
                         Tambah Metode
@@ -655,7 +939,13 @@ export default function AdminSettings() {
                       />
                       <div className="flex items-center gap-2">
                         <button
-                          onClick={() => updateBilliardPackage(pkg.id, { isActive: !pkg.isActive })}
+                          onClick={() => {
+                            updateBilliardPackage(pkg.id, { isActive: !pkg.isActive });
+                            toast({
+                              title: pkg.isActive ? 'Paket dinonaktifkan' : 'Paket diaktifkan',
+                              description: `${pkg.name} sekarang ${pkg.isActive ? 'nonaktif' : 'aktif'}.`,
+                            });
+                          }}
                           className={cn(
                             'flex h-8 w-8 items-center justify-center rounded-xl transition-colors',
                             pkg.isActive
@@ -665,12 +955,36 @@ export default function AdminSettings() {
                         >
                           {pkg.isActive ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
                         </button>
-                        <button
-                          onClick={() => deleteBilliardPackage(pkg.id)}
-                          className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-100 text-rose-600 transition-colors hover:bg-rose-200 dark:bg-rose-500/15 dark:text-rose-300"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                        {packageDeleteConfirm === pkg.id ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => {
+                                deleteBilliardPackage(pkg.id);
+                                setPackageDeleteConfirm(null);
+                                toast({
+                                  title: 'Paket dihapus',
+                                  description: `${pkg.name} berhasil dihapus.`,
+                                });
+                              }}
+                              className="rounded-lg bg-rose-500 px-2 py-1 text-[10px] font-bold text-white"
+                            >
+                              Ya
+                            </button>
+                            <button
+                              onClick={() => setPackageDeleteConfirm(null)}
+                              className="rounded-lg bg-slate-200 px-2 py-1 text-[10px] font-bold text-slate-700 dark:bg-white/10 dark:text-slate-300"
+                            >
+                              Batal
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setPackageDeleteConfirm(pkg.id)}
+                            className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-100 text-rose-600 transition-colors hover:bg-rose-200 dark:bg-rose-500/15 dark:text-rose-300"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
                       </div>
                     </div>
                     <div className="mt-2 flex items-center justify-between px-1 text-[11px] text-slate-500 dark:text-slate-400">
@@ -680,11 +994,19 @@ export default function AdminSettings() {
                   </div>
                 ))}
               </div>
+              {packageError ? (
+                <div className="mt-3 rounded-[12px] border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+                  {packageError}
+                </div>
+              ) : null}
               <div className="mt-3 grid grid-cols-[minmax(0,1fr)_74px_108px] gap-2 rounded-[16px] bg-slate-50 p-3 dark:bg-white/5">
                 <input
                   type="text"
                   value={newPackageName}
-                  onChange={(event) => setNewPackageName(event.target.value)}
+                  onChange={(event) => {
+                    setNewPackageName(event.target.value);
+                    setPackageError('');
+                  }}
                   placeholder="Nama paket"
                   className={inputClass}
                 />
@@ -692,7 +1014,10 @@ export default function AdminSettings() {
                   type="number"
                   min="1"
                   value={newPackageHours}
-                  onChange={(event) => setNewPackageHours(Math.max(1, parseInt(event.target.value, 10) || 1))}
+                  onChange={(event) => {
+                    setNewPackageHours(Math.max(1, parseInt(event.target.value, 10) || 1));
+                    setPackageError('');
+                  }}
                   placeholder="Jam"
                   className={inputClass}
                 />
@@ -700,25 +1025,16 @@ export default function AdminSettings() {
                   type="number"
                   min="0"
                   value={newPackagePrice}
-                  onChange={(event) => setNewPackagePrice(Math.max(0, parseInt(event.target.value, 10) || 0))}
+                  onChange={(event) => {
+                    setNewPackagePrice(Math.max(0, parseInt(event.target.value, 10) || 0));
+                    setPackageError('');
+                  }}
                   placeholder="Harga"
                   className={inputClass}
                 />
                 <TabletActionButton
                   className="col-span-3"
-                  disabled={!newPackageName.trim()}
-                  onClick={() => {
-                    if (!newPackageName.trim()) return;
-                    addBilliardPackage({
-                      name: newPackageName.trim(),
-                      durationHours: newPackageHours,
-                      price: newPackagePrice,
-                      isActive: true,
-                    });
-                    setNewPackageName('');
-                    setNewPackageHours(2);
-                    setNewPackagePrice(45000);
-                  }}
+                  onClick={handleAddPackage}
                 >
                   <Plus className="h-4 w-4" />
                   Tambah Paket

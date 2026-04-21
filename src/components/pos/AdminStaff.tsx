@@ -6,6 +6,7 @@ import { Check, Pencil, Plus, Shield, Trash2, UserCog, Users, X } from 'lucide-r
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/context/AuthContext';
 import type { Staff } from '@/context/AuthContext';
+import { useToast } from '@/hooks/use-toast';
 import { TabletActionButton, TabletMetricCard, TabletPage, TabletPagination, TabletPanel, TabletSectionHeader, paginateItems } from './TabletPrimitives';
 
 interface FormData {
@@ -20,48 +21,113 @@ const PAGE_SIZE = 6;
 
 export default function AdminStaff() {
   const { staffList, currentStaff, addStaff, updateStaff, deleteStaff } = useAuth();
+  const { toast } = useToast();
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormData>(emptyForm);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [formError, setFormError] = useState('');
 
   const activeCount = staffList.filter((staff) => staff.isActive).length;
   const adminCount = staffList.filter((staff) => staff.role === 'admin' && staff.isActive).length;
   const kasirCount = staffList.filter((staff) => staff.role === 'kasir' && staff.isActive).length;
   const paged = useMemo(() => paginateItems(staffList, page, PAGE_SIZE), [page, staffList]);
 
-  const handleAdd = () => {
-    if (!form.name.trim() || !form.username.trim() || form.pin.length !== 4) return;
+  const validateForm = (requirePin: boolean) => {
+    if (!form.name.trim()) return 'Nama staff wajib diisi.';
+    if (!form.username.trim()) return 'Username staff wajib diisi.';
+    if (requirePin && form.pin.length !== 4) return 'PIN staff harus 4 digit.';
+    if (!requirePin && form.pin.length > 0 && form.pin.length !== 4) return 'PIN baru harus 4 digit.';
+    return '';
+  };
+
+  const handleAdd = async () => {
+    const validationError = validateForm(true);
+    if (validationError) {
+      setFormError(validationError);
+      toast({
+        title: 'Data staff belum lengkap',
+        description: validationError,
+        variant: 'destructive',
+      });
+      return;
+    }
     const initials = form.name.split(' ').map((part) => part[0]).join('').toUpperCase().slice(0, 2);
-    addStaff({
-      name: form.name,
-      username: form.username,
-      pin: form.pin,
-      role: form.role,
-      avatar: initials,
-      isActive: true,
-    });
-    setForm(emptyForm);
-    setShowForm(false);
+    try {
+      await addStaff({
+        name: form.name.trim(),
+        username: form.username.trim(),
+        pin: form.pin,
+        role: form.role,
+        avatar: initials,
+        isActive: true,
+      });
+      setForm(emptyForm);
+      setFormError('');
+      setShowForm(false);
+      toast({
+        title: 'Staff ditambahkan',
+        description: `${form.name.trim()} berhasil masuk ke daftar staff.`,
+      });
+    } catch (error) {
+      setFormError('Gagal menambahkan staff. Coba lagi.');
+      toast({
+        title: 'Gagal menambahkan staff',
+        description: error instanceof Error ? error.message : 'Terjadi kesalahan saat menyimpan staff.',
+        variant: 'destructive',
+      });
+    }
   };
 
   const handleEdit = (staff: Staff) => {
     setForm({
       name: staff.name,
       username: staff.username,
-      pin: staff.pin,
+      pin: '',
       role: staff.role,
     });
     setEditingId(staff.id);
+    setFormError('');
   };
 
-  const handleSaveEdit = () => {
-    if (!editingId || !form.name.trim() || !form.username.trim() || form.pin.length !== 4) return;
+  const handleSaveEdit = async () => {
+    const validationError = validateForm(false);
+    if (!editingId || validationError) {
+      if (validationError) {
+        setFormError(validationError);
+        toast({
+          title: 'Perubahan staff belum valid',
+          description: validationError,
+          variant: 'destructive',
+        });
+      }
+      return;
+    }
     const initials = form.name.split(' ').map((part) => part[0]).join('').toUpperCase().slice(0, 2);
-    updateStaff(editingId, { ...form, avatar: initials });
-    setEditingId(null);
-    setForm(emptyForm);
+    try {
+      await updateStaff(editingId, {
+        name: form.name.trim(),
+        username: form.username.trim(),
+        role: form.role,
+        avatar: initials,
+        ...(form.pin ? { pin: form.pin } : {}),
+      });
+      setEditingId(null);
+      setForm(emptyForm);
+      setFormError('');
+      toast({
+        title: 'Staff diperbarui',
+        description: 'Perubahan data staff berhasil disimpan.',
+      });
+    } catch (error) {
+      setFormError('Gagal menyimpan perubahan staff.');
+      toast({
+        title: 'Gagal memperbarui staff',
+        description: error instanceof Error ? error.message : 'Terjadi kesalahan saat menyimpan perubahan.',
+        variant: 'destructive',
+      });
+    }
   };
 
   const canDelete = (id: string) => {
@@ -73,17 +139,66 @@ export default function AdminStaff() {
     return true;
   };
 
-  const toggleActive = (id: string) => {
-    if (id === currentStaff?.id) return;
+  const toggleActive = async (id: string) => {
+    if (id === currentStaff?.id) {
+      toast({
+        title: 'Aksi ditolak',
+        description: 'Staff yang sedang login tidak bisa dinonaktifkan.',
+        variant: 'destructive',
+      });
+      return;
+    }
     const target = staffList.find((staff) => staff.id === id);
     if (!target) return;
-    updateStaff(id, { isActive: !target.isActive });
+    try {
+      await updateStaff(id, { isActive: !target.isActive });
+      toast({
+        title: target.isActive ? 'Staff dinonaktifkan' : 'Staff diaktifkan',
+        description: `${target.name} sekarang ${target.isActive ? 'nonaktif' : 'aktif'}.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Gagal mengubah status staff',
+        description: error instanceof Error ? error.message : 'Terjadi kesalahan saat mengubah status staff.',
+        variant: 'destructive',
+      });
+    }
   };
 
   const cancelForm = () => {
     setShowForm(false);
     setEditingId(null);
     setForm(emptyForm);
+    setDeleteConfirm(null);
+    setFormError('');
+  };
+
+  const handleDelete = async (staff: Staff) => {
+    if (!canDelete(staff.id)) {
+      toast({
+        title: 'Staff tidak bisa dihapus',
+        description: staff.id === currentStaff?.id
+          ? 'Staff yang sedang login tidak bisa dihapus.'
+          : 'Minimal harus ada satu admin aktif yang tersisa.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      await deleteStaff(staff.id);
+      setDeleteConfirm(null);
+      toast({
+        title: 'Staff dihapus',
+        description: `${staff.name} berhasil dihapus dari daftar staff.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Gagal menghapus staff',
+        description: error instanceof Error ? error.message : 'Terjadi kesalahan saat menghapus staff.',
+        variant: 'destructive',
+      });
+    }
   };
 
   return (
@@ -106,6 +221,11 @@ export default function AdminStaff() {
 
       <TabletPanel className="space-y-3">
         <TabletSectionHeader title="Akun Staff" subtitle="Edit role, PIN, dan status staff secara langsung dari registry." />
+        {formError ? (
+          <div className="rounded-[14px] border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+            {formError}
+          </div>
+        ) : null}
 
         <AnimatePresence>
           {showForm && (
@@ -169,7 +289,7 @@ export default function AdminStaff() {
                     )}>
                       {staff.role}
                     </span>
-                    <p className="text-sm font-bold text-slate-950 dark:text-white">{staff.pin}</p>
+                    <p className="text-sm font-bold text-slate-950 dark:text-white">••••</p>
                     <button
                       onClick={() => toggleActive(staff.id)}
                       className={cn(
@@ -185,7 +305,7 @@ export default function AdminStaff() {
                       <TabletActionButton tone="secondary" onClick={() => handleEdit(staff)}><Pencil className="h-4 w-4" /></TabletActionButton>
                       {deleteConfirm === staff.id ? (
                         <>
-                          <TabletActionButton tone="danger" onClick={() => { deleteStaff(staff.id); setDeleteConfirm(null); }}>Hapus</TabletActionButton>
+                          <TabletActionButton tone="danger" onClick={() => { void handleDelete(staff); }}>Hapus</TabletActionButton>
                           <TabletActionButton tone="secondary" onClick={() => setDeleteConfirm(null)}>Batal</TabletActionButton>
                         </>
                       ) : (

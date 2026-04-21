@@ -1,195 +1,305 @@
 'use client';
 
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { apiRequest } from '@/lib/api';
 
-// ============================================================
-// Type Definitions
-// ============================================================
+const STAFF_TOKEN_KEY = 'auth_token';
+const TENANT_TOKEN_KEY = 'tenant_token';
 
 export interface Staff {
   id: string;
+  tenantId?: string;
   name: string;
   username: string;
-  pin: string;
+  pin?: string;
   role: 'admin' | 'kasir';
   avatar: string;
   isActive: boolean;
 }
 
-export interface AuthContextType {
-  currentStaff: Staff | null;
-  isAuthenticated: boolean;
-  authReady: boolean;
-  login: (staffId: string, pin: string) => boolean;
-  logout: () => void;
-  verifyAdminPin: (pin: string) => boolean;
-  verifyStaffPin: (staffId: string, pin: string) => boolean;
-  staffList: Staff[];
-  addStaff: (staff: Omit<Staff, 'id'>) => void;
-  updateStaff: (id: string, updates: Partial<Staff>) => void;
-  deleteStaff: (id: string) => void;
+export interface TenantAccount {
+  id: string;
+  name: string;
+  email: string;
+  plan: string;
 }
 
-// ============================================================
-// Dummy Staff Data
-// ============================================================
+export interface AuthContextType {
+  currentTenant: TenantAccount | null;
+  currentStaff: Staff | null;
+  staffList: Staff[];
+  tenantAuthenticated: boolean;
+  isAuthenticated: boolean;
+  authReady: boolean;
+  tenantLogin: (email: string, password: string) => Promise<boolean>;
+  staffPinLogin: (staffId: string, pin: string) => Promise<boolean>;
+  logoutStaff: () => Promise<void>;
+  logout: () => Promise<void>;
+  verifyAdminPin: (pin: string) => Promise<boolean>;
+  verifyStaffPin: (staffId: string, pin: string) => Promise<boolean>;
+  addStaff: (staff: Omit<Staff, 'id'>) => Promise<void>;
+  updateStaff: (id: string, updates: Partial<Staff>) => Promise<void>;
+  deleteStaff: (id: string) => Promise<void>;
+}
 
-const INITIAL_STAFF: Staff[] = [
-  {
-    id: 'staff-1',
-    name: 'Admin',
-    username: 'admin',
-    pin: '1234',
-    role: 'admin',
-    avatar: 'AD',
-    isActive: true,
-  },
-  {
-    id: 'staff-2',
-    name: 'Kasir Satu',
-    username: 'kasir1',
-    pin: '0000',
-    role: 'kasir',
-    avatar: 'K1',
-    isActive: true,
-  },
-  {
-    id: 'staff-3',
-    name: 'Kasir Dua',
-    username: 'kasir2',
-    pin: '0000',
-    role: 'kasir',
-    avatar: 'K2',
-    isActive: true,
-  },
-];
+type StaffApi = {
+  id: string;
+  tenant_id?: string;
+  name: string;
+  username: string;
+  pin?: string;
+  role: 'admin' | 'kasir';
+  avatar: string;
+  is_active?: boolean;
+  isActive?: boolean;
+};
 
-const AUTH_STORAGE_KEY = 'auth-session:v1';
-
-// ============================================================
-// Context
-// ============================================================
+function mapStaff(staff: StaffApi): Staff {
+  return {
+    id: staff.id,
+    tenantId: staff.tenant_id,
+    name: staff.name,
+    username: staff.username,
+    pin: staff.pin,
+    role: staff.role,
+    avatar: staff.avatar,
+    isActive: Boolean(staff.isActive ?? staff.is_active ?? false),
+  };
+}
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [currentTenant, setCurrentTenant] = useState<TenantAccount | null>(null);
   const [currentStaff, setCurrentStaff] = useState<Staff | null>(null);
-  const [staffList, setStaffList] = useState<Staff[]>(INITIAL_STAFF);
+  const [staffList, setStaffList] = useState<Staff[]>([]);
   const [authReady, setAuthReady] = useState(false);
+  const [tenantAuthenticated, setTenantAuthenticated] = useState(false);
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      const raw = localStorage.getItem(AUTH_STORAGE_KEY);
-      if (!raw) {
-        setAuthReady(true);
-        return;
-      }
-      const parsed = JSON.parse(raw) as Partial<{
-        staffList: Staff[];
-        currentStaffId: string | null;
-      }>;
-      const nextStaffList = parsed.staffList?.length ? parsed.staffList : INITIAL_STAFF;
-      setStaffList(nextStaffList);
-      const nextCurrentStaff = parsed.currentStaffId
-        ? nextStaffList.find((staff) => staff.id === parsed.currentStaffId && staff.isActive) ?? null
-        : null;
-      setCurrentStaff(nextCurrentStaff);
-    } catch {
-      setStaffList(INITIAL_STAFF);
-      setCurrentStaff(null);
-    } finally {
-      setAuthReady(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!authReady || typeof window === 'undefined') return;
-    localStorage.setItem(
-      AUTH_STORAGE_KEY,
-      JSON.stringify({
-        staffList,
-        currentStaffId: currentStaff?.id ?? null,
-      })
-    );
-  }, [authReady, currentStaff, staffList]);
-
-  const login = useCallback((staffId: string, pin: string): boolean => {
-    const staff = staffList.find(
-      (s) => s.id === staffId && s.pin === pin && s.isActive
-    );
-    if (staff) {
-      setCurrentStaff(staff);
-      return true;
-    }
-    return false;
-  }, [staffList]);
-
-  const logout = useCallback(() => {
-    setCurrentStaff(null);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(
-        AUTH_STORAGE_KEY,
-        JSON.stringify({
-          staffList,
-          currentStaffId: null,
-        })
-      );
-    }
-  }, [staffList]);
-
-  // Verify an admin/owner PIN without changing login state
-  const verifyAdminPin = useCallback((pin: string): boolean => {
-    return staffList.some(
-      (s) => s.role === 'admin' && s.pin === pin && s.isActive
-    );
-  }, [staffList]);
-
-  const verifyStaffPin = useCallback((staffId: string, pin: string): boolean => {
-    return staffList.some(
-      (s) => s.id === staffId && s.pin === pin && s.isActive
-    );
-  }, [staffList]);
-
-  const addStaff = useCallback((staff: Omit<Staff, 'id'>) => {
-    const newId = `staff-${Date.now()}`;
-    setStaffList((prev) => [...prev, { ...staff, id: newId }]);
-  }, []);
-
-  const updateStaff = useCallback((id: string, updates: Partial<Staff>) => {
-    setStaffList((prev) => {
-      const nextStaffList = prev.map((s) => (s.id === id ? { ...s, ...updates } : s));
-      setCurrentStaff((curr) => {
-        if (!curr || curr.id !== id) return curr;
-        const updatedCurrent = nextStaffList.find((staff) => staff.id === id) ?? null;
-        return updatedCurrent && updatedCurrent.isActive ? updatedCurrent : null;
-      });
-      return nextStaffList;
+  const fetchStaffList = useCallback(async (): Promise<Staff[]> => {
+    const response = await apiRequest<{ data: StaffApi[] }>('auth/staff-list', {
+      authType: 'tenant',
     });
-    // Update currentStaff if the updated staff is the currently logged in one
+    const normalized = response.data.map(mapStaff);
+    setStaffList(normalized);
+    return normalized;
   }, []);
 
-  const deleteStaff = useCallback(
-    (id: string) => {
-      setStaffList((prev) => prev.filter((s) => s.id !== id));
-      setCurrentStaff((curr) => (curr?.id === id ? null : curr));
-    },
-    []
-  );
+  const checkStaffSession = useCallback(async (): Promise<void> => {
+    const token = localStorage.getItem(STAFF_TOKEN_KEY);
+    if (!token) return;
 
-  const value: AuthContextType = {
+    try {
+      const response = await apiRequest<{ data: StaffApi }>('auth/me', {
+        authType: 'staff',
+      });
+      setCurrentStaff(mapStaff(response.data));
+    } catch (error) {
+      console.error('Failed to verify staff session:', error);
+      localStorage.removeItem(STAFF_TOKEN_KEY);
+      setCurrentStaff(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    const bootstrap = async () => {
+      try {
+        const tenantToken = localStorage.getItem(TENANT_TOKEN_KEY);
+        setTenantAuthenticated(Boolean(tenantToken));
+        if (tenantToken) {
+          try {
+            await fetchStaffList();
+          } catch (error) {
+            console.error('Failed to fetch tenant staff list:', error);
+            localStorage.removeItem(TENANT_TOKEN_KEY);
+            setTenantAuthenticated(false);
+            setStaffList([]);
+          }
+        }
+
+        await checkStaffSession();
+      } finally {
+        setAuthReady(true);
+      }
+    };
+
+    void bootstrap();
+  }, [checkStaffSession, fetchStaffList]);
+
+  const tenantLogin = useCallback(async (email: string, password: string): Promise<boolean> => {
+    try {
+      const response = await apiRequest<{ data: { tenant: TenantAccount; token: string } }>('auth/tenant-login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+        authType: 'none',
+      });
+
+      localStorage.setItem(TENANT_TOKEN_KEY, response.data.token);
+      localStorage.removeItem(STAFF_TOKEN_KEY);
+      setCurrentTenant(response.data.tenant);
+      setCurrentStaff(null);
+      setTenantAuthenticated(true);
+      await fetchStaffList();
+
+      return true;
+    } catch (error) {
+      console.error('Tenant login failed:', error);
+      return false;
+    }
+  }, [fetchStaffList]);
+
+  const staffPinLogin = useCallback(async (staffId: string, pin: string): Promise<boolean> => {
+    try {
+      const response = await apiRequest<{ data: { staff: StaffApi; token: string } }>('auth/staff-pin-login', {
+        method: 'POST',
+        body: JSON.stringify({ staff_id: staffId, pin }),
+        authType: 'tenant',
+      });
+
+      localStorage.setItem(STAFF_TOKEN_KEY, response.data.token);
+      setCurrentStaff(mapStaff(response.data.staff));
+      return true;
+    } catch (error) {
+      console.error('Staff PIN login failed:', error);
+      return false;
+    }
+  }, []);
+
+  const logoutStaff = useCallback(async () => {
+    try {
+      if (localStorage.getItem(STAFF_TOKEN_KEY)) {
+        await apiRequest('auth/logout', { method: 'POST', authType: 'staff' });
+      }
+    } catch (error) {
+      console.error('Staff logout error:', error);
+    } finally {
+      localStorage.removeItem(STAFF_TOKEN_KEY);
+      setCurrentStaff(null);
+    }
+  }, []);
+
+  const logout = useCallback(async () => {
+    try {
+      await logoutStaff();
+      if (localStorage.getItem(TENANT_TOKEN_KEY)) {
+        await apiRequest('auth/logout', { method: 'POST', authType: 'tenant' });
+      }
+    } catch (error) {
+      console.error('Logout error:', error);
+    } finally {
+      localStorage.removeItem(STAFF_TOKEN_KEY);
+      localStorage.removeItem(TENANT_TOKEN_KEY);
+      setCurrentTenant(null);
+      setCurrentStaff(null);
+      setStaffList([]);
+      setTenantAuthenticated(false);
+    }
+  }, [logoutStaff]);
+
+  const verifyAdminPin = useCallback(async (pin: string): Promise<boolean> => {
+    try {
+      const response = await apiRequest<{ data: { valid: boolean } }>('auth/verify-admin-pin', {
+        method: 'POST',
+        body: JSON.stringify({ pin }),
+        authType: 'staff',
+      });
+      return response.data.valid;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const verifyStaffPin = useCallback(async (staffId: string, pin: string): Promise<boolean> => {
+    try {
+      const response = await apiRequest<{ data: { valid: boolean } }>('auth/verify-staff-pin', {
+        method: 'POST',
+        body: JSON.stringify({ staff_id: staffId, pin }),
+        authType: 'staff',
+      });
+      return response.data.valid;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const addStaff = useCallback(async (staff: Omit<Staff, 'id'>) => {
+    await apiRequest('staff', {
+      method: 'POST',
+      authType: 'staff',
+      body: JSON.stringify({
+        name: staff.name,
+        username: staff.username,
+        pin: staff.pin ?? '',
+        role: staff.role,
+        avatar: staff.avatar,
+        is_active: staff.isActive,
+      }),
+    });
+    await fetchStaffList();
+  }, [fetchStaffList]);
+
+  const updateStaff = useCallback(async (id: string, updates: Partial<Staff>) => {
+    await apiRequest(`staff/${id}`, {
+      method: 'PUT',
+      authType: 'staff',
+      body: JSON.stringify({
+        name: updates.name,
+        username: updates.username,
+        pin: updates.pin,
+        role: updates.role,
+        avatar: updates.avatar,
+        is_active: updates.isActive,
+      }),
+    });
+    await fetchStaffList();
+    if (currentStaff?.id === id) {
+      await checkStaffSession();
+    }
+  }, [checkStaffSession, currentStaff?.id, fetchStaffList]);
+
+  const deleteStaff = useCallback(async (id: string) => {
+    await apiRequest(`staff/${id}`, {
+      method: 'DELETE',
+      authType: 'staff',
+    });
+    await fetchStaffList();
+    if (currentStaff?.id === id) {
+      await logout();
+    }
+  }, [currentStaff?.id, fetchStaffList, logout]);
+
+  const value = useMemo<AuthContextType>(() => ({
+    currentTenant,
     currentStaff,
+    staffList,
+    tenantAuthenticated,
     isAuthenticated: currentStaff !== null,
     authReady,
-    login,
+    tenantLogin,
+    staffPinLogin,
+    logoutStaff,
     logout,
     verifyAdminPin,
     verifyStaffPin,
-    staffList,
     addStaff,
     updateStaff,
     deleteStaff,
-  };
+  }), [
+    addStaff,
+    authReady,
+    currentStaff,
+    currentTenant,
+    deleteStaff,
+    logoutStaff,
+    logout,
+    staffList,
+    staffPinLogin,
+    tenantAuthenticated,
+    tenantLogin,
+    updateStaff,
+    verifyAdminPin,
+    verifyStaffPin,
+  ]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

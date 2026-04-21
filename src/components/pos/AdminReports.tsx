@@ -4,10 +4,8 @@ import React, { useMemo, useState } from 'react';
 import {
   BarChart3,
   CircleDot,
-  Clock,
   Coffee,
   DollarSign,
-  Package,
   RotateCcw,
   ShoppingCart,
   TrendingUp,
@@ -38,6 +36,15 @@ function formatDuration(minutes: number) {
 
 function formatHour(hour: number) {
   return `${String(hour).padStart(2, '0')}:00`;
+}
+
+function formatDateTime(date: Date) {
+  return new Date(date).toLocaleString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function getDayKey(date: Date) {
@@ -171,21 +178,33 @@ function BilliardReport({
   orders: OrderHistory[];
   period: Period;
 }) {
-  const filtered = useMemo(
+  const salesOrders = useMemo(
     () =>
       filterByPeriod(
-        orders.filter((order) => order.status === 'completed' && order.sessionType === 'billiard'),
+        orders.filter((order) => order.sessionType === 'billiard'),
+        period
+      ),
+    [orders, period]
+  );
+
+  const refundedOrders = useMemo(
+    () =>
+      filterByPeriod(
+        orders.filter((order) => order.status === 'refunded' && order.sessionType === 'billiard'),
         period
       ),
     [orders, period]
   );
 
   const metrics = useMemo(() => {
-    const totalRental = filtered.reduce((sum, order) => sum + order.rentalCost, 0);
-    const totalSessions = filtered.length;
+    const grossRevenue = salesOrders.reduce((sum, order) => sum + order.grandTotal, 0);
+    const refundTotal = refundedOrders.reduce((sum, order) => sum + order.grandTotal, 0);
+    const totalRental = salesOrders.reduce((sum, order) => sum + order.rentalCost, 0);
+    const totalFnb = salesOrders.reduce((sum, order) => sum + order.orderTotal, 0);
+    const totalSessions = salesOrders.length;
     const avgDurationMinutes =
       totalSessions > 0
-        ? Math.round(filtered.reduce((sum, order) => sum + order.durationMinutes, 0) / totalSessions)
+        ? Math.round(salesOrders.reduce((sum, order) => sum + order.durationMinutes, 0) / totalSessions)
         : 0;
 
     const hourMap: Record<number, number> = {};
@@ -198,18 +217,18 @@ function BilliardReport({
       { type: TableType; sessions: number; revenue: number }
     > = {};
 
-    filtered.forEach((order) => {
+    salesOrders.forEach((order) => {
       const hour = new Date(order.startTime).getHours();
       hourMap[hour] = (hourMap[hour] ?? 0) + 1;
 
       const dayKey = getDayKey(order.createdAt);
       dailyMap[dayKey] ??= { date: new Date(order.createdAt), revenue: 0, sessions: 0 };
-      dailyMap[dayKey].revenue += order.rentalCost;
+      dailyMap[dayKey].revenue += order.grandTotal;
       dailyMap[dayKey].sessions += 1;
 
       tableMap[order.tableName] ??= { type: order.tableType, sessions: 0, revenue: 0 };
       tableMap[order.tableName].sessions += 1;
-      tableMap[order.tableName].revenue += order.rentalCost;
+      tableMap[order.tableName].revenue += order.grandTotal;
     });
 
     const busiestHour = Object.entries(hourMap).sort((a, b) => Number(b[1]) - Number(a[1]))[0];
@@ -222,7 +241,12 @@ function BilliardReport({
       }));
 
     return {
+      grossRevenue,
+      refundTotal,
+      refundCount: refundedOrders.length,
+      netRevenue: grossRevenue - refundTotal,
       totalRental,
+      totalFnb,
       totalSessions,
       avgDurationMinutes,
       busiestHour,
@@ -230,8 +254,12 @@ function BilliardReport({
       tableRows: Object.entries(tableMap)
         .sort((a, b) => b[1].revenue - a[1].revenue)
         .slice(0, 6),
+      recentRefunds: refundedOrders
+        .slice()
+        .sort((a, b) => new Date(b.refundedAt ?? b.createdAt).getTime() - new Date(a.refundedAt ?? a.createdAt).getTime())
+        .slice(0, 8),
     };
-  }, [filtered]);
+  }, [salesOrders, refundedOrders]);
 
   const avgDurationLabel = metrics.avgDurationMinutes > 0 ? formatDuration(metrics.avgDurationMinutes) : '0j 0m';
 
@@ -241,31 +269,31 @@ function BilliardReport({
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <ReportMetricCard
             icon={DollarSign}
-            label="Pendapatan"
-            value={formatRupiah(metrics.totalRental)}
-            description="Total pendapatan sewa"
+            label="Gross Sales"
+            value={formatRupiah(metrics.grossRevenue)}
+            description="Pendapatan kotor sesi billiard"
+            tone="info"
+          />
+          <ReportMetricCard
+            icon={RotateCcw}
+            label="Refund Total"
+            value={formatRupiah(metrics.refundTotal)}
+            description="Akumulasi nominal refund"
+            tone="critical"
+          />
+          <ReportMetricCard
+            icon={TrendingUp}
+            label="Net Sales"
+            value={formatRupiah(metrics.netRevenue)}
+            description="Gross sales dikurangi refund"
             tone="success"
           />
           <ReportMetricCard
             icon={ShoppingCart}
-            label="Sesi"
-            value={`${metrics.totalSessions}`}
-            description="Sesi selesai"
-            tone="info"
-          />
-          <ReportMetricCard
-            icon={Clock}
-            label="Durasi"
-            value={avgDurationLabel}
-            description="Rata-rata permainan"
+            label="Refund Count"
+            value={`${metrics.refundCount}`}
+            description="Jumlah transaksi refunded"
             tone="warning"
-          />
-          <ReportMetricCard
-            icon={TrendingUp}
-            label="Jam Sibuk"
-            value={metrics.busiestHour ? formatHour(Number(metrics.busiestHour[0])) : '-'}
-            description={metrics.busiestHour ? `${metrics.busiestHour[1]} sesi` : 'Belum ada pola'}
-            tone="default"
           />
         </div>
 
@@ -273,7 +301,7 @@ function BilliardReport({
           <ReportSectionHeader
             icon={BarChart3}
             title="Performa Harian"
-            subtitle="Puncak pendapatan untuk sesi billiard pada periode terpilih."
+            subtitle="Tren gross sales sesi billiard pada periode terpilih."
           />
           <ReportBarChart
             rows={metrics.dailyRows}
@@ -290,7 +318,7 @@ function BilliardReport({
           <ReportSectionHeader
             icon={Trophy}
             title="Meja Terbaik"
-            subtitle="Enam meja dengan pendapatan tertinggi."
+            subtitle="Enam meja dengan gross sales tertinggi."
           />
           {metrics.tableRows.length === 0 ? (
             <TabletEmptyState
@@ -322,21 +350,21 @@ function BilliardReport({
           )}
         </TabletPanel>
 
+        <ReportRefundAuditPanel
+          refunds={metrics.recentRefunds}
+          emptyDescription="Refund billiard pada periode aktif akan muncul di sini."
+        />
+
         <TabletPanel className="flex flex-col">
           <ReportSectionHeader
             icon={CircleDot}
             title="Observasi Cepat"
-            subtitle="Ringkasan cepat untuk pengambilan keputusan shift."
+            subtitle="Ringkasan revenue dan pola sesi billiard."
           />
           <div className="grid gap-4">
-            <InsightRow
-              label="Kontribusi per sesi"
-              value={
-                metrics.totalSessions > 0
-                  ? formatRupiah(Math.round(metrics.totalRental / metrics.totalSessions))
-                  : '-'
-              }
-            />
+            <InsightRow label="Total sesi selesai" value={`${metrics.totalSessions}`} />
+            <InsightRow label="Pendapatan sewa" value={formatRupiah(metrics.totalRental)} />
+            <InsightRow label="Pendapatan F&B" value={formatRupiah(metrics.totalFnb)} />
             <InsightRow
               label="Produktivitas rata-rata"
               value={metrics.avgDurationMinutes > 0 ? avgDurationLabel : '-'}
@@ -359,22 +387,32 @@ function FnbReport({
   orders: OrderHistory[];
   period: Period;
 }) {
-  const filtered = useMemo(
+  const salesOrders = useMemo(
     () =>
       filterByPeriod(
-        orders.filter((order) => order.status === 'completed' && order.orders.length > 0),
+        orders.filter((order) => order.orders.length > 0),
+        period
+      ),
+    [orders, period]
+  );
+
+  const refundedOrders = useMemo(
+    () =>
+      filterByPeriod(
+        orders.filter((order) => order.status === 'refunded' && order.orders.length > 0),
         period
       ),
     [orders, period]
   );
 
   const metrics = useMemo(() => {
-    const totalRevenue = filtered.reduce((sum, order) => sum + order.orderTotal, 0);
-    const totalItems = filtered.reduce(
+    const grossRevenue = salesOrders.reduce((sum, order) => sum + order.grandTotal, 0);
+    const refundTotal = refundedOrders.reduce((sum, order) => sum + order.grandTotal, 0);
+    const totalItems = salesOrders.reduce(
       (sum, order) => sum + order.orders.reduce((itemSum, item) => itemSum + item.quantity, 0),
       0
     );
-    const totalCost = filtered.reduce(
+    const totalCost = salesOrders.reduce(
       (sum, order) =>
         sum + order.orders.reduce((itemSum, item) => itemSum + item.menuItem.cost * item.quantity, 0),
       0
@@ -387,10 +425,10 @@ function FnbReport({
     const categoryMap: Record<string, { qty: number; revenue: number }> = {};
     const itemMap: Record<string, { name: string; emoji: string; qty: number; revenue: number }> = {};
 
-    filtered.forEach((order) => {
+    salesOrders.forEach((order) => {
       const dayKey = getDayKey(order.createdAt);
       dailyMap[dayKey] ??= { date: new Date(order.createdAt), revenue: 0, items: 0 };
-      dailyMap[dayKey].revenue += order.orderTotal;
+      dailyMap[dayKey].revenue += order.grandTotal;
       dailyMap[dayKey].items += order.orders.reduce((sum, item) => sum + item.quantity, 0);
 
       order.orders.forEach((item) => {
@@ -418,16 +456,23 @@ function FnbReport({
       }));
 
     return {
-      totalRevenue,
+      grossRevenue,
+      refundTotal,
+      refundCount: refundedOrders.length,
+      netRevenue: grossRevenue - refundTotal,
       totalItems,
       totalCost,
-      margin: totalRevenue - totalCost,
-      marginPct: totalRevenue > 0 ? Math.round(((totalRevenue - totalCost) / totalRevenue) * 100) : 0,
+      margin: grossRevenue - totalCost,
+      marginPct: grossRevenue > 0 ? Math.round(((grossRevenue - totalCost) / grossRevenue) * 100) : 0,
       dailyRows,
       categoryRows: Object.entries(categoryMap).sort((a, b) => b[1].revenue - a[1].revenue),
       topItems: Object.values(itemMap).sort((a, b) => b.revenue - a.revenue).slice(0, 6),
+      recentRefunds: refundedOrders
+        .slice()
+        .sort((a, b) => new Date(b.refundedAt ?? b.createdAt).getTime() - new Date(a.refundedAt ?? a.createdAt).getTime())
+        .slice(0, 8),
     };
-  }, [filtered]);
+  }, [salesOrders, refundedOrders]);
 
   const totalCategoryRevenue = metrics.categoryRows.reduce((sum, [, row]) => sum + row.revenue, 0) || 1;
 
@@ -437,31 +482,31 @@ function FnbReport({
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <ReportMetricCard
             icon={DollarSign}
-            label="Pendapatan"
-            value={formatRupiah(metrics.totalRevenue)}
-            description="Total penjualan F&B"
-            tone="warning"
-          />
-          <ReportMetricCard
-            icon={ShoppingCart}
-            label="Item"
-            value={`${metrics.totalItems}`}
-            description="Produk terjual"
+            label="Gross Sales"
+            value={formatRupiah(metrics.grossRevenue)}
+            description="Pendapatan kotor transaksi F&B"
             tone="info"
           />
           <ReportMetricCard
-            icon={Package}
-            label="HPP"
-            value={formatRupiah(metrics.totalCost)}
-            description="Biaya bahan baku"
+            icon={RotateCcw}
+            label="Refund Total"
+            value={formatRupiah(metrics.refundTotal)}
+            description="Akumulasi nominal refund"
             tone="critical"
           />
           <ReportMetricCard
             icon={TrendingUp}
-            label="Margin"
-            value={formatRupiah(metrics.margin)}
-            description={`${metrics.marginPct}% margin`}
+            label="Net Sales"
+            value={formatRupiah(metrics.netRevenue)}
+            description="Gross sales dikurangi refund"
             tone="success"
+          />
+          <ReportMetricCard
+            icon={ShoppingCart}
+            label="Refund Count"
+            value={`${metrics.refundCount}`}
+            description="Jumlah transaksi refunded"
+            tone="warning"
           />
         </div>
 
@@ -469,7 +514,7 @@ function FnbReport({
           <ReportSectionHeader
             icon={Coffee}
             title="Tren Penjualan Harian"
-            subtitle="Kinerja penjualan F&B dalam periode aktif."
+            subtitle="Tren gross sales F&B dalam periode aktif."
           />
           <ReportBarChart
             rows={metrics.dailyRows}
@@ -486,7 +531,7 @@ function FnbReport({
           <ReportSectionHeader
             icon={UtensilsCrossed}
             title="Kategori Utama"
-            subtitle="Kontribusi omzet per kategori."
+            subtitle="Kontribusi gross sales per kategori."
           />
           {metrics.categoryRows.length === 0 ? (
             <TabletEmptyState
@@ -536,6 +581,11 @@ function FnbReport({
           )}
         </TabletPanel>
 
+        <ReportRefundAuditPanel
+          refunds={metrics.recentRefunds}
+          emptyDescription="Refund F&B pada periode aktif akan muncul di sini."
+        />
+
         <TabletPanel className="flex flex-col">
           <ReportSectionHeader
             icon={Trophy}
@@ -569,8 +619,82 @@ function FnbReport({
             </div>
           )}
         </TabletPanel>
+
+        <TabletPanel className="flex flex-col">
+          <ReportSectionHeader
+            icon={CircleDot}
+            title="Observasi Cepat"
+            subtitle="Ikhtisar HPP, margin, dan jumlah item terjual."
+          />
+          <div className="grid gap-4">
+            <InsightRow label="Item terjual" value={`${metrics.totalItems}`} />
+            <InsightRow label="HPP total" value={formatRupiah(metrics.totalCost)} />
+            <InsightRow label="Margin kotor" value={formatRupiah(metrics.margin)} />
+            <InsightRow label="Margin persentase" value={`${metrics.marginPct}%`} />
+          </div>
+        </TabletPanel>
       </div>
     </div>
+  );
+}
+
+function ReportRefundAuditPanel({
+  refunds,
+  emptyDescription,
+}: {
+  refunds: OrderHistory[];
+  emptyDescription: string;
+}) {
+  return (
+    <TabletPanel className="flex min-h-[320px] flex-col">
+      <ReportSectionHeader
+        icon={RotateCcw}
+        title="Audit Refund"
+        subtitle="Daftar refund terbaru beserta alasan / remarks yang tersimpan."
+      />
+      {refunds.length === 0 ? (
+        <TabletEmptyState
+          title="Belum ada refund"
+          description={emptyDescription}
+          className="min-h-[220px] flex-1"
+        />
+      ) : (
+        <div className="grid gap-3">
+          {refunds.map((order) => (
+            <div
+              key={order.id}
+              className="rounded-[18px] border border-rose-200/80 bg-rose-50 p-4 dark:border-rose-500/20 dark:bg-rose-500/10"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-[15px] font-black tracking-[-0.02em] text-slate-950 dark:text-white">
+                    {order.tableName}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    {order.sessionType === 'billiard' ? 'Billiard' : 'F&B'} • {order.memberName || 'Non-member'}
+                  </p>
+                </div>
+                <p className="pl-3 text-right text-[14px] font-black text-rose-600 dark:text-rose-300">
+                  {formatRupiah(order.grandTotal)}
+                </p>
+              </div>
+              <div className="mt-3 grid gap-1 text-xs text-slate-600 dark:text-slate-300">
+                <p>
+                  {order.refundedAt ? formatDateTime(order.refundedAt) : formatDateTime(order.createdAt)}
+                  {' • '}
+                  {order.refundedBy || order.servedBy}
+                </p>
+                <p className="font-semibold text-rose-700 dark:text-rose-300">
+                  Alasan / Remarks Refund
+                </p>
+                <p className="text-slate-700 dark:text-slate-200">{order.refundReason?.trim() || '-'}</p>
+                <p className="font-mono text-[11px] text-slate-400 dark:text-slate-500">{order.id}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </TabletPanel>
   );
 }
 
@@ -676,8 +800,8 @@ function ShiftReport({
         </TabletPanel>
       </div>
 
-      <div className="grid min-h-0 gap-3">
-        <TabletPanel className="flex min-h-[320px] flex-col">
+      <div className="grid min-h-0 gap-3 xl:grid-rows-[minmax(0,1fr)_auto]">
+        <TabletPanel className="flex min-h-[320px] flex-col overflow-hidden xl:min-h-0">
           <ReportSectionHeader
             icon={CircleDot}
             title="Ringkasan Shift Terbaru"
@@ -690,67 +814,69 @@ function ShiftReport({
               className="min-h-[220px] flex-1"
             />
           ) : (
-            <div className="grid gap-3">
-              {metrics.rows.map((shift) => (
-                <div
-                  key={shift.id}
-                  className="rounded-[18px] border border-slate-200/80 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/5"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[15px] font-black tracking-[-0.02em] text-slate-950 dark:text-white">
-                      {shift.staffName}
-                    </p>
-                    <span className={cn(
-                      'rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.14em]',
-                      shift.status === 'active'
-                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
-                        : shift.status === 'legacy'
-                          ? 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-300'
-                          : 'bg-slate-200 text-slate-700 dark:bg-white/10 dark:text-slate-300'
-                    )}>
-                      {shift.status}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                    {new Date(shift.openedAt).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                  </p>
-                  <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                    Kasir terlibat: {shift.involvedStaffNames.join(' -> ')}
-                  </p>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                    <div className="rounded-xl bg-white px-2 py-1.5 dark:bg-slate-950">
-                      <p className="text-slate-400">Kas Awal</p>
-                      <p className="font-semibold text-slate-900 dark:text-white">{formatRupiah(shift.openingCash)}</p>
-                    </div>
-                    <div className="rounded-xl bg-white px-2 py-1.5 dark:bg-slate-950">
-                      <p className="text-slate-400">Kas Teoritis</p>
-                      <p className="font-semibold text-slate-900 dark:text-white">{formatRupiah(shift.expectedCash)}</p>
-                    </div>
-                    <div className="rounded-xl bg-white px-2 py-1.5 dark:bg-slate-950">
-                      <p className="text-slate-400">Kas Fisik</p>
-                      <p className="font-semibold text-slate-900 dark:text-white">{formatRupiah(shift.closingCash ?? 0)}</p>
-                    </div>
-                    <div className="rounded-xl bg-white px-2 py-1.5 dark:bg-slate-950">
-                      <p className="text-slate-400">Selisih</p>
-                      <p className={cn(
-                        'font-semibold',
-                        (shift.varianceCash ?? 0) === 0
-                          ? 'text-slate-900 dark:text-white'
-                          : (shift.varianceCash ?? 0) > 0
-                            ? 'text-emerald-600 dark:text-emerald-300'
-                            : 'text-rose-600 dark:text-rose-300'
-                      )}>
-                        {formatRupiah(shift.varianceCash ?? 0)}
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+              <div className="space-y-3">
+                {metrics.rows.map((shift) => (
+                  <div
+                    key={shift.id}
+                    className="rounded-[18px] border border-slate-200/80 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[15px] font-black tracking-[-0.02em] text-slate-950 dark:text-white">
+                        {shift.staffName}
                       </p>
+                      <span className={cn(
+                        'rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.14em]',
+                        shift.status === 'active'
+                          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+                          : shift.status === 'legacy'
+                            ? 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-300'
+                            : 'bg-slate-200 text-slate-700 dark:bg-white/10 dark:text-slate-300'
+                      )}>
+                        {shift.status}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      {new Date(shift.openedAt).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                    <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                      Kasir terlibat: {shift.involvedStaffNames.join(' -> ')}
+                    </p>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                      <div className="rounded-xl bg-white px-2 py-1.5 dark:bg-slate-950">
+                        <p className="text-slate-400">Kas Awal</p>
+                        <p className="font-semibold text-slate-900 dark:text-white">{formatRupiah(shift.openingCash)}</p>
+                      </div>
+                      <div className="rounded-xl bg-white px-2 py-1.5 dark:bg-slate-950">
+                        <p className="text-slate-400">Kas Teoritis</p>
+                        <p className="font-semibold text-slate-900 dark:text-white">{formatRupiah(shift.expectedCash)}</p>
+                      </div>
+                      <div className="rounded-xl bg-white px-2 py-1.5 dark:bg-slate-950">
+                        <p className="text-slate-400">Kas Fisik</p>
+                        <p className="font-semibold text-slate-900 dark:text-white">{formatRupiah(shift.closingCash ?? 0)}</p>
+                      </div>
+                      <div className="rounded-xl bg-white px-2 py-1.5 dark:bg-slate-950">
+                        <p className="text-slate-400">Selisih</p>
+                        <p className={cn(
+                          'font-semibold',
+                          (shift.varianceCash ?? 0) === 0
+                            ? 'text-slate-900 dark:text-white'
+                            : (shift.varianceCash ?? 0) > 0
+                              ? 'text-emerald-600 dark:text-emerald-300'
+                              : 'text-rose-600 dark:text-rose-300'
+                        )}>
+                          {formatRupiah(shift.varianceCash ?? 0)}
+                        </p>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           )}
         </TabletPanel>
 
-        <TabletPanel className="flex flex-col">
+        <TabletPanel className="flex flex-col xl:self-start">
           <ReportSectionHeader
             icon={ShoppingCart}
             title="Observasi Kas"

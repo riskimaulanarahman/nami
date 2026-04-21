@@ -13,18 +13,23 @@ import {
   Trash2,
   CheckCircle2,
   ChevronRight,
+  Printer,
   Save,
   Users,
   ScanQrCode,
   UtensilsCrossed,
   UserPlus,
+  ChefHat,
+  MessageSquare,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { usePos } from '@/context/PosContext';
 import { useAuth } from '@/context/AuthContext';
+import { useToast } from '@/hooks/use-toast';
 import type { FulfillmentType, Member, OpenBill, OrderHistory, PaymentOption } from '@/context/PosContext';
 import MenuList from './MenuList';
 import PrintReceipt from './PrintReceipt';
+import { printDraftReceiptDirect, printReceiptDirect, printKitchenReceiptFromBill, printKitchenReceiptFromOrder } from './PrintReceipt';
 
 function formatRupiah(amount: number): string {
   return new Intl.NumberFormat('id-ID', {
@@ -55,11 +60,14 @@ export default function CafeOrderModal() {
     activeOpenBillId,
     setActiveOpenBillId,
     updateOpenBill,
+    saveOpenBillDraft,
+    fetchOpenBillReceipt,
     deleteOpenBill,
     assignTableToOpenBill,
     addItemToOpenBill,
     removeItemFromOpenBill,
     updateOpenBillItemQuantity,
+    updateOpenBillItemNote,
     checkoutOpenBill,
     canTransact,
     activeCashierShift,
@@ -72,6 +80,7 @@ export default function CafeOrderModal() {
     attachMemberToOpenBill,
   } = usePos();
   const { currentStaff } = useAuth();
+  const { toast } = useToast();
 
   const [activeTab, setActiveTab] = useState<'order' | 'bill'>('order');
   const [activeFulfillment, setActiveFulfillment] = useState<FulfillmentType>('dine-in');
@@ -85,6 +94,10 @@ export default function CafeOrderModal() {
   const [showNewMember, setShowNewMember] = useState(false);
   const [newMemberName, setNewMemberName] = useState('');
   const [newMemberPhone, setNewMemberPhone] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [isPrintingDraft, setIsPrintingDraft] = useState(false);
+  const [expandedNoteKeys, setExpandedNoteKeys] = useState<Set<string>>(new Set());
 
   const activeBill = openBills.find((bill) => bill.id === activeOpenBillId) ?? null;
   const isVisible = activeBill !== null || lastOrder !== null;
@@ -105,8 +118,7 @@ export default function CafeOrderModal() {
 
   const availableTables = tables.filter(
     (table) =>
-      table.status !== 'occupied' &&
-      (!table.activeOpenBillId || table.activeOpenBillId === activeBill?.id)
+      !table.activeOpenBillId || table.activeOpenBillId === activeBill?.id
   );
 
   const activeGroup = activeBill?.groups.find((group) => group.fulfillmentType === activeFulfillment) ?? null;
@@ -130,6 +142,7 @@ export default function CafeOrderModal() {
   };
 
   const handleOpenPayment = () => {
+    if (isSubmitting) return;
     if (!canTransact) {
       setRefError('Buka shift kasir terlebih dahulu untuk checkout.');
       return;
@@ -141,7 +154,7 @@ export default function CafeOrderModal() {
     setExpandedPaymentId(null);
   };
 
-  const handleConfirmPayment = () => {
+  const handleConfirmPayment = async () => {
     if (!activeBill || !selectedPayment || !currentStaff) return;
     if (!canTransact) {
       setRefError('Buka shift kasir terlebih dahulu untuk checkout.');
@@ -152,15 +165,32 @@ export default function CafeOrderModal() {
       return;
     }
 
-    const history = checkoutOpenBill(
-      activeBill.id,
-      { id: currentStaff.id, name: currentStaff.name },
-      selectedPayment.id,
-      resolvePaymentMethodName(selectedPayment),
-      selectedPayment.requiresReference ? paymentRef.trim() : null
-    );
-    setShowPayment(false);
-    setLastOrder(history);
+    setIsSubmitting(true);
+    setRefError('');
+
+    try {
+      const history = await checkoutOpenBill(
+        activeBill.id,
+        { id: currentStaff.id, name: currentStaff.name },
+        selectedPayment.id,
+        resolvePaymentMethodName(selectedPayment),
+        selectedPayment.requiresReference ? paymentRef.trim() : null
+      );
+      setShowPayment(false);
+      setLastOrder(history);
+      setSelectedPayment(null);
+      setPaymentRef('');
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Terjadi kesalahan sistem saat memproses pembayaran.';
+      setRefError(message);
+      toast({
+        title: 'Checkout Gagal',
+        description: message,
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleDone = () => {
@@ -169,6 +199,7 @@ export default function CafeOrderModal() {
   };
 
   const handleClose = () => {
+    if (isSubmitting) return;
     if (lastOrder) return;
     if (showPayment) {
       setShowPayment(false);
@@ -177,9 +208,67 @@ export default function CafeOrderModal() {
     setActiveOpenBillId(null);
   };
 
-  const handleSaveDraft = () => {
+  const handleSaveDraft = async () => {
+    if (isSubmitting || isSavingDraft || isPrintingDraft) return;
     if (showPayment || lastOrder) return;
-    setActiveOpenBillId(null);
+    if (!activeBill) return;
+
+    setIsSavingDraft(true);
+    try {
+      const savedBill = await saveOpenBillDraft(activeBill.id);
+      setActiveOpenBillId(null);
+      toast({
+        title: 'Draft disimpan',
+        description: `${savedBill.code} sudah sinkron ke database.`,
+      });
+    } catch (e) {
+      toast({
+        title: 'Gagal menyimpan draft',
+        description: e instanceof Error ? e.message : 'Terjadi kesalahan sistem saat menyimpan draft.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSavingDraft(false);
+    }
+  };
+
+  const handlePrintDraft = async () => {
+    if (isSubmitting || isSavingDraft || isPrintingDraft) return;
+    if (showPayment || lastOrder) return;
+    if (!activeBill) return;
+
+    setIsPrintingDraft(true);
+    try {
+      const savedBill = await saveOpenBillDraft(activeBill.id);
+      const receipt = await fetchOpenBillReceipt(savedBill.id);
+      printDraftReceiptDirect(receipt, settings, settings.paperSize);
+    } catch (e) {
+      toast({
+        title: 'Gagal mencetak draft',
+        description: e instanceof Error ? e.message : 'Terjadi kesalahan sistem saat mengambil struk draft dari database.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsPrintingDraft(false);
+    }
+  };
+
+  const handlePrintKitchen = () => {
+    if (!activeBill) return;
+    const paperSize = settings.printerSettings?.kitchen?.paperSize ?? '58mm';
+    printKitchenReceiptFromBill(activeBill, settings, paperSize);
+  };
+
+  const handlePrintKasirAfterCheckout = () => {
+    if (!lastOrder) return;
+    const paperSize = settings.printerSettings?.cashier?.paperSize ?? settings.paperSize;
+    printReceiptDirect(lastOrder, settings, paperSize);
+  };
+
+  const handlePrintKitchenAfterCheckout = () => {
+    if (!lastOrder) return;
+    const paperSize = settings.printerSettings?.kitchen?.paperSize ?? '58mm';
+    printKitchenReceiptFromOrder(lastOrder, settings, paperSize);
   };
 
   if (!isVisible) return null;
@@ -252,7 +341,51 @@ export default function CafeOrderModal() {
                 </div>
               </div>
 
-              <PrintReceipt order={lastOrder} settings={settings} paperSize={settings.paperSize} />
+              {(() => {
+                const cashierEnabled = settings.printerSettings?.cashier?.enabled ?? true;
+                const kitchenEnabled = settings.printerSettings?.kitchen?.enabled ?? false;
+                if (cashierEnabled && kitchenEnabled) {
+                  return (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          onClick={handlePrintKasirAfterCheckout}
+                          className="flex items-center justify-center gap-2 rounded-xl bg-blue-600 py-2.5 text-sm font-bold text-white hover:bg-blue-500 transition-colors"
+                        >
+                          <Printer className="h-4 w-4" />
+                          Cetak Kasir
+                        </button>
+                        <button
+                          onClick={handlePrintKitchenAfterCheckout}
+                          className="flex items-center justify-center gap-2 rounded-xl bg-orange-600 py-2.5 text-sm font-bold text-white hover:bg-orange-500 transition-colors"
+                        >
+                          <ChefHat className="h-4 w-4" />
+                          Cetak Dapur
+                        </button>
+                      </div>
+                      <button
+                        onClick={() => { handlePrintKasirAfterCheckout(); handlePrintKitchenAfterCheckout(); }}
+                        className="w-full flex items-center justify-center gap-2 rounded-xl bg-slate-600 py-2.5 text-sm font-bold text-white hover:bg-slate-500 transition-colors"
+                      >
+                        <Printer className="h-4 w-4" />
+                        Cetak Keduanya
+                      </button>
+                    </div>
+                  );
+                }
+                if (kitchenEnabled) {
+                  return (
+                    <button
+                      onClick={handlePrintKitchenAfterCheckout}
+                      className="w-full flex items-center justify-center gap-2 rounded-xl bg-orange-600 py-2.5 text-sm font-bold text-white hover:bg-orange-500 transition-colors"
+                    >
+                      <ChefHat className="h-4 w-4" />
+                      Cetak Struk Dapur
+                    </button>
+                  );
+                }
+                return <PrintReceipt order={lastOrder} settings={settings} paperSize={settings.printerSettings?.cashier?.paperSize ?? settings.paperSize} />;
+              })()}
             </div>
 
             <div className="flex-shrink-0 px-6 py-4 border-t border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-gray-950/80">
@@ -304,7 +437,8 @@ export default function CafeOrderModal() {
                       <p className="text-xs text-muted-foreground mt-0.5">Satu pembayaran untuk seluruh open bill</p>
                     </div>
                     <button
-                      onClick={() => setShowPayment(false)}
+                      onClick={() => { if (!isSubmitting) setShowPayment(false); }}
+                      disabled={isSubmitting}
                       className="h-8 w-8 rounded-lg bg-gray-100 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/20 flex items-center justify-center transition-colors"
                     >
                       <X className="h-4 w-4 text-foreground" />
@@ -327,7 +461,9 @@ export default function CafeOrderModal() {
                         <motion.button
                           whileHover={{ scale: 1.01 }}
                           whileTap={{ scale: 0.98 }}
+                          disabled={isSubmitting}
                           onClick={() => {
+                            if (isSubmitting) return;
                             if (payment.isGroup) {
                               setExpandedPaymentId((prev) => prev === payment.id ? null : payment.id);
                               setSelectedPayment(null);
@@ -369,7 +505,9 @@ export default function CafeOrderModal() {
                               return (
                                 <button
                                   key={child.id}
+                                  disabled={isSubmitting}
                                   onClick={() => {
+                                    if (isSubmitting) return;
                                     setSelectedPayment(child);
                                     setPaymentRef('');
                                     setRefError('');
@@ -407,6 +545,7 @@ export default function CafeOrderModal() {
                         <input
                           type="text"
                           value={paymentRef}
+                          disabled={isSubmitting}
                           onChange={(event) => { setPaymentRef(event.target.value); setRefError(''); }}
                           placeholder={selectedPayment.referenceLabel}
                           className="w-full rounded-lg bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all"
@@ -417,16 +556,22 @@ export default function CafeOrderModal() {
                   )}
                 </AnimatePresence>
 
+                {refError && !selectedPayment?.requiresReference && (
+                  <div className="px-4 pb-3">
+                    <p className="text-xs text-red-500">{refError}</p>
+                  </div>
+                )}
+
                 <div className="border-t border-gray-200 px-4 py-4 dark:border-white/10">
                   <motion.button
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
                     onClick={handleConfirmPayment}
-                    disabled={!selectedPayment}
+                    disabled={!selectedPayment || isSubmitting}
                     className="w-full py-3 rounded-xl font-bold text-base transition-all bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     <CreditCard className="h-5 w-5" />
-                    KONFIRMASI PEMBAYARAN
+                    {isSubmitting ? 'MEMPROSES...' : 'KONFIRMASI PEMBAYARAN'}
                   </motion.button>
                 </div>
               </motion.div>
@@ -653,7 +798,7 @@ export default function CafeOrderModal() {
                           <option value="">Pilih meja dine-in</option>
                           {availableTables.map((table) => (
                             <option key={table.id} value={table.id}>
-                              {table.name} • {table.type === 'vip' ? 'VIP' : 'Standar'}
+                              {table.name} • {table.type === 'vip' ? 'VIP' : 'Standar'}{table.status === 'occupied' ? ' (Aktif)' : ''}
                             </option>
                           ))}
                         </select>
@@ -731,39 +876,74 @@ export default function CafeOrderModal() {
                                 <p className="text-sm font-bold text-orange-600 dark:text-orange-400">{formatRupiah(group.subtotal)}</p>
                               </div>
                               <div className="p-3 space-y-2">
-                                {group.items.map((order) => (
-                                  <div key={order.menuItem.id} className="flex flex-wrap items-center gap-2 rounded-lg bg-gray-100 p-2.5 dark:bg-white/5 sm:flex-nowrap">
-                                    <span className="text-lg flex-shrink-0">{order.menuItem.emoji}</span>
-                                    <div className="flex-1 min-w-0">
-                                      <p className="text-sm font-semibold text-foreground truncate">{order.menuItem.name}</p>
-                                      <p className="text-xs text-muted-foreground">{formatRupiah(order.menuItem.price)} / item</p>
+                                {group.items.map((order) => {
+                                  const noteKey = `${group.fulfillmentType}-${order.menuItem.id}`;
+                                  const noteOpen = expandedNoteKeys.has(noteKey);
+                                  const hasNote = Boolean(order.note);
+                                  return (
+                                    <div key={order.menuItem.id} className="rounded-lg bg-gray-100 dark:bg-white/5 overflow-hidden">
+                                      <div className="flex flex-wrap items-center gap-2 p-2.5 sm:flex-nowrap">
+                                        <span className="text-lg shrink-0">{order.menuItem.emoji}</span>
+                                        <div className="flex-1 min-w-0">
+                                          <p className="text-sm font-semibold text-foreground truncate">{order.menuItem.name}</p>
+                                          <p className="text-xs text-muted-foreground">{formatRupiah(order.menuItem.price)} / item</p>
+                                        </div>
+                                        <div className="flex items-center gap-1 sm:ml-auto">
+                                          <button
+                                            title={hasNote ? order.note : 'Tambah catatan'}
+                                            onClick={() => setExpandedNoteKeys((prev) => {
+                                              const next = new Set(prev);
+                                              next.has(noteKey) ? next.delete(noteKey) : next.add(noteKey);
+                                              return next;
+                                            })}
+                                            className={cn(
+                                              'h-8 w-8 rounded-lg flex items-center justify-center transition-colors',
+                                              hasNote
+                                                ? 'bg-orange-100 text-orange-600 dark:bg-orange-500/20 dark:text-orange-400'
+                                                : 'bg-gray-200 dark:bg-white/10 hover:bg-gray-300 dark:hover:bg-white/20 text-muted-foreground'
+                                            )}
+                                          >
+                                            <MessageSquare className="h-3.5 w-3.5" />
+                                          </button>
+                                          <button
+                                            onClick={() => updateOpenBillItemQuantity(activeBill.id, group.fulfillmentType, order.menuItem.id, order.quantity - 1)}
+                                            className="h-8 w-8 rounded-lg bg-gray-200 dark:bg-white/10 hover:bg-gray-300 dark:hover:bg-white/20 text-foreground flex items-center justify-center"
+                                          >
+                                            <Minus className="h-3.5 w-3.5" />
+                                          </button>
+                                          <span className="min-w-7 text-center text-sm font-bold text-foreground">{order.quantity}</span>
+                                          <button
+                                            onClick={() => updateOpenBillItemQuantity(activeBill.id, group.fulfillmentType, order.menuItem.id, order.quantity + 1)}
+                                            className="h-8 w-8 rounded-lg bg-gray-200 dark:bg-white/10 hover:bg-gray-300 dark:hover:bg-white/20 text-foreground flex items-center justify-center"
+                                          >
+                                            <Plus className="h-3.5 w-3.5" />
+                                          </button>
+                                          <button
+                                            onClick={() => removeItemFromOpenBill(activeBill.id, group.fulfillmentType, order.menuItem.id)}
+                                            className="h-8 w-8 rounded-lg bg-red-100 dark:bg-red-500/15 hover:bg-red-200 dark:hover:bg-red-500/25 text-red-500 dark:text-red-400 flex items-center justify-center"
+                                          >
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                          </button>
+                                        </div>
+                                        <div className="w-full text-right text-sm font-bold text-foreground sm:w-24">
+                                          {formatRupiah(order.menuItem.price * order.quantity)}
+                                        </div>
+                                      </div>
+                                      {noteOpen && (
+                                        <div className="px-2.5 pb-2.5">
+                                          <input
+                                            type="text"
+                                            autoFocus
+                                            defaultValue={order.note ?? ''}
+                                            placeholder="Catatan untuk item ini..."
+                                            onBlur={(e) => updateOpenBillItemNote(activeBill.id, group.fulfillmentType, order.menuItem.id, e.target.value)}
+                                            className="w-full rounded-md bg-white dark:bg-gray-900 border border-orange-200 dark:border-orange-500/30 px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-orange-400/60 transition-all"
+                                          />
+                                        </div>
+                                      )}
                                     </div>
-                                    <div className="flex items-center gap-1 sm:ml-auto">
-                                      <button
-                                        onClick={() => updateOpenBillItemQuantity(activeBill.id, group.fulfillmentType, order.menuItem.id, order.quantity - 1)}
-                                        className="h-8 w-8 rounded-lg bg-gray-200 dark:bg-white/10 hover:bg-gray-300 dark:hover:bg-white/20 text-foreground flex items-center justify-center"
-                                      >
-                                        <Minus className="h-3.5 w-3.5" />
-                                      </button>
-                                      <span className="min-w-[28px] text-center text-sm font-bold text-foreground">{order.quantity}</span>
-                                      <button
-                                        onClick={() => updateOpenBillItemQuantity(activeBill.id, group.fulfillmentType, order.menuItem.id, order.quantity + 1)}
-                                        className="h-8 w-8 rounded-lg bg-gray-200 dark:bg-white/10 hover:bg-gray-300 dark:hover:bg-white/20 text-foreground flex items-center justify-center"
-                                      >
-                                        <Plus className="h-3.5 w-3.5" />
-                                      </button>
-                                      <button
-                                        onClick={() => removeItemFromOpenBill(activeBill.id, group.fulfillmentType, order.menuItem.id)}
-                                        className="h-8 w-8 rounded-lg bg-red-100 dark:bg-red-500/15 hover:bg-red-200 dark:hover:bg-red-500/25 text-red-500 dark:text-red-400 flex items-center justify-center"
-                                      >
-                                        <Trash2 className="h-3.5 w-3.5" />
-                                      </button>
-                                    </div>
-                                    <div className="w-full text-right text-sm font-bold text-foreground sm:w-24">
-                                      {formatRupiah(order.menuItem.price * order.quantity)}
-                                    </div>
-                                  </div>
-                                ))}
+                                  );
+                                })}
                               </div>
                             </div>
                           ))
@@ -807,22 +987,46 @@ export default function CafeOrderModal() {
           <div className="flex flex-shrink-0 flex-col-reverse gap-3 border-t border-gray-200 bg-gray-50 px-6 py-4 dark:border-white/10 dark:bg-gray-950/80 sm:flex-row">
             <button
               onClick={() => deleteOpenBill(activeBill.id)}
-              className="w-full rounded-xl bg-red-100 px-4 py-3 text-sm font-semibold text-red-600 transition-colors hover:bg-red-200 dark:bg-red-500/15 dark:text-red-400 dark:hover:bg-red-500/25 sm:w-auto"
+              disabled={isSavingDraft || isPrintingDraft || isSubmitting}
+              className="w-full rounded-xl bg-red-100 px-4 py-3 text-sm font-semibold text-red-600 transition-colors hover:bg-red-200 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-red-500/15 dark:text-red-400 dark:hover:bg-red-500/25 sm:w-auto"
             >
               Hapus Open Bill
             </button>
             <button
               onClick={handleSaveDraft}
-              className="w-full rounded-xl bg-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-300 dark:bg-white/10 dark:text-slate-200 dark:hover:bg-white/20 sm:w-auto"
+              disabled={isSavingDraft || isPrintingDraft || isSubmitting}
+              className="w-full rounded-xl bg-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-300 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-white/10 dark:text-slate-200 dark:hover:bg-white/20 sm:w-auto"
             >
               <span className="inline-flex items-center gap-2">
                 <Save className="h-4 w-4" />
-                Save Draft Bill
+                {isSavingDraft ? 'Menyimpan...' : 'Save Draft Bill'}
               </span>
             </button>
             <button
+              onClick={handlePrintDraft}
+              disabled={isSavingDraft || isPrintingDraft || isSubmitting}
+              className="w-full rounded-xl bg-sky-100 px-4 py-3 text-sm font-semibold text-sky-700 transition-colors hover:bg-sky-200 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-sky-500/15 dark:text-sky-300 dark:hover:bg-sky-500/25 sm:w-auto"
+            >
+              <span className="inline-flex items-center gap-2">
+                <Printer className="h-4 w-4" />
+                {isPrintingDraft ? 'Menyiapkan...' : 'Cetak Draft'}
+              </span>
+            </button>
+            {hasBillItems && (
+              <button
+                onClick={handlePrintKitchen}
+                disabled={isSavingDraft || isPrintingDraft || isSubmitting}
+                className="w-full rounded-xl bg-orange-100 px-4 py-3 text-sm font-semibold text-orange-700 transition-colors hover:bg-orange-200 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-orange-500/15 dark:text-orange-300 dark:hover:bg-orange-500/25 sm:w-auto"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <ChefHat className="h-4 w-4" />
+                  Cetak Dapur
+                </span>
+              </button>
+            )}
+            <button
               onClick={handleOpenPayment}
-              disabled={activeBill.groups.every((group) => group.items.length === 0)}
+              disabled={activeBill.groups.every((group) => group.items.length === 0) || isSavingDraft || isPrintingDraft}
               className="flex-1 py-3 rounded-xl font-bold text-base transition-all bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               {selectedPayment?.type === 'qris' ? <ScanQrCode className="h-5 w-5" /> : <CreditCard className="h-5 w-5" />}

@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Plus, Pencil, Trash2, X, Check, Search, Tag, ToggleLeft, ToggleRight, ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { usePos } from '@/context/PosContext';
+import { useToast } from '@/hooks/use-toast';
 import type { MenuItem, RecipeItem } from '@/context/PosContext';
 
 function formatRupiah(amount: number): string {
@@ -42,12 +43,14 @@ const emptyForm: FormData = {
 // ============================================================
 function CategoryTab() {
   const { categories, addCategory, updateCategory, deleteCategory, menuItems } = usePos();
+  const { toast } = useToast();
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [formName, setFormName] = useState('');
   const [formEmoji, setFormEmoji] = useState('');
   const [formDesc, setFormDesc] = useState('');
+  const [formError, setFormError] = useState('');
 
   const getCategoryItemCount = (catId: string) => menuItems.filter((m) => m.categoryId === catId).length;
 
@@ -55,10 +58,16 @@ function CategoryTab() {
     setFormName('');
     setFormEmoji('');
     setFormDesc('');
+    setFormError('');
   };
 
   const handleAdd = () => {
-    if (!formName.trim()) return;
+    if (!formName.trim()) {
+      const message = 'Nama kategori wajib diisi.';
+      setFormError(message);
+      toast({ title: 'Kategori belum lengkap', description: message, variant: 'destructive' });
+      return;
+    }
     addCategory({
       name: formName.trim(),
       emoji: formEmoji || '📦',
@@ -67,6 +76,10 @@ function CategoryTab() {
     });
     resetCatForm();
     setShowForm(false);
+    toast({
+      title: 'Kategori ditambahkan',
+      description: `${formName.trim()} berhasil ditambahkan.`,
+    });
   };
 
   const handleEdit = (cat: typeof categories[0]) => {
@@ -75,10 +88,16 @@ function CategoryTab() {
     setFormDesc(cat.description);
     setEditingId(cat.id);
     setShowForm(false);
+    setFormError('');
   };
 
   const handleSaveEdit = () => {
-    if (!editingId || !formName.trim()) return;
+    if (!editingId || !formName.trim()) {
+      const message = 'Nama kategori wajib diisi.';
+      setFormError(message);
+      toast({ title: 'Perubahan kategori belum valid', description: message, variant: 'destructive' });
+      return;
+    }
     updateCategory(editingId, {
       name: formName.trim(),
       emoji: formEmoji || '📦',
@@ -86,17 +105,37 @@ function CategoryTab() {
     });
     setEditingId(null);
     resetCatForm();
+    toast({
+      title: 'Kategori diperbarui',
+      description: 'Perubahan kategori berhasil disimpan.',
+    });
   };
 
   const handleToggleActive = (cat: typeof categories[0]) => {
     updateCategory(cat.id, { isActive: !cat.isActive });
+    toast({
+      title: cat.isActive ? 'Kategori dinonaktifkan' : 'Kategori diaktifkan',
+      description: `${cat.name} sekarang ${cat.isActive ? 'nonaktif' : 'aktif'}.`,
+    });
   };
 
   const handleDelete = (id: string) => {
     const itemCount = getCategoryItemCount(id);
-    if (itemCount > 0) return; // protect
+    const category = categories.find((cat) => cat.id === id);
+    if (itemCount > 0) {
+      toast({
+        title: 'Kategori tidak bisa dihapus',
+        description: 'Masih ada menu yang memakai kategori ini.',
+        variant: 'destructive',
+      });
+      return;
+    }
     deleteCategory(id);
     setDeleteConfirm(null);
+    toast({
+      title: 'Kategori dihapus',
+      description: `${category?.name ?? 'Kategori'} berhasil dihapus.`,
+    });
   };
 
   return (
@@ -116,6 +155,11 @@ function CategoryTab() {
       </div>
 
       {/* Add Form */}
+      {formError ? (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+          {formError}
+        </div>
+      ) : null}
       <AnimatePresence>
         {showForm && (
           <motion.div
@@ -270,6 +314,7 @@ function CategoryTab() {
 // ============================================================
 export default function AdminMenu() {
   const { menuItems, addMenuItem, updateMenuItem, deleteMenuItem, categories, ingredients } = usePos();
+  const { toast } = useToast();
   const [mainTab, setMainTab] = useState<'menu' | 'category'>('menu');
   const [activeTab, setActiveTab] = useState<string>('all');
   const [search, setSearch] = useState('');
@@ -278,6 +323,7 @@ export default function AdminMenu() {
   const [form, setForm] = useState<FormData>(emptyForm);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [showRecipeEditor, setShowRecipeEditor] = useState(false);
+  const [menuFormError, setMenuFormError] = useState('');
 
   const filtered = useMemo(() => menuItems.filter((item) => {
     if (activeTab !== 'all' && item.categoryId !== activeTab) return false;
@@ -295,15 +341,38 @@ export default function AdminMenu() {
   }, [form.recipe, ingredients]);
 
   const handleAdd = () => {
-    if (!form.name.trim() || form.price <= 0) return;
+    if (!form.name.trim()) {
+      const message = 'Nama menu wajib diisi.';
+      setMenuFormError(message);
+      toast({ title: 'Menu belum lengkap', description: message, variant: 'destructive' });
+      return;
+    }
+    if (!form.categoryId) {
+      const message = 'Kategori menu wajib dipilih.';
+      setMenuFormError(message);
+      toast({ title: 'Menu belum lengkap', description: message, variant: 'destructive' });
+      return;
+    }
+    if (form.price <= 0) {
+      const message = 'Harga jual harus lebih dari 0.';
+      setMenuFormError(message);
+      toast({ title: 'Menu belum lengkap', description: message, variant: 'destructive' });
+      return;
+    }
     addMenuItem({
       id: `item-${Date.now()}`,
       ...form,
       cost: calculatedCost || form.cost,
     });
+    const savedName = form.name.trim();
     setForm(emptyForm);
     setShowForm(false);
     setShowRecipeEditor(false);
+    setMenuFormError('');
+    toast({
+      title: 'Menu ditambahkan',
+      description: `${savedName} berhasil ditambahkan ke daftar menu.`,
+    });
   };
 
   const handleEdit = (item: MenuItem) => {
@@ -321,10 +390,22 @@ export default function AdminMenu() {
     setEditingId(item.id);
     setShowForm(false);
     setShowRecipeEditor(false);
+    setMenuFormError('');
   };
 
   const handleSaveEdit = () => {
-    if (!editingId || !form.name.trim()) return;
+    if (!editingId || !form.name.trim()) {
+      const message = 'Nama menu wajib diisi.';
+      setMenuFormError(message);
+      toast({ title: 'Perubahan menu belum valid', description: message, variant: 'destructive' });
+      return;
+    }
+    if (form.price <= 0) {
+      const message = 'Harga jual harus lebih dari 0.';
+      setMenuFormError(message);
+      toast({ title: 'Perubahan menu belum valid', description: message, variant: 'destructive' });
+      return;
+    }
     updateMenuItem(editingId, {
       ...form,
       cost: calculatedCost || form.cost,
@@ -332,11 +413,21 @@ export default function AdminMenu() {
     setEditingId(null);
     setForm(emptyForm);
     setShowRecipeEditor(false);
+    setMenuFormError('');
+    toast({
+      title: 'Menu diperbarui',
+      description: 'Perubahan menu berhasil disimpan.',
+    });
   };
 
   const handleDelete = (id: string) => {
+    const menu = menuItems.find((item) => item.id === id);
     deleteMenuItem(id);
     setDeleteConfirm(null);
+    toast({
+      title: 'Menu dihapus',
+      description: `${menu?.name ?? 'Menu'} berhasil dihapus.`,
+    });
   };
 
   const cancelForm = () => {
@@ -344,10 +435,18 @@ export default function AdminMenu() {
     setEditingId(null);
     setForm(emptyForm);
     setShowRecipeEditor(false);
+    setMenuFormError('');
   };
 
   const addRecipeItem = () => {
-    if (ingredients.length === 0) return;
+    if (ingredients.length === 0) {
+      toast({
+        title: 'Bahan baku belum tersedia',
+        description: 'Tambahkan bahan di Inventaris sebelum membuat resep menu.',
+        variant: 'destructive',
+      });
+      return;
+    }
     const firstIng = ingredients.find((i) => !form.recipe.some((r) => r.ingredientId === i.id)) || ingredients[0];
     setForm((f) => ({
       ...f,
@@ -371,6 +470,10 @@ export default function AdminMenu() {
 
   const toggleAvailable = (item: MenuItem) => {
     updateMenuItem(item.id, { isAvailable: !item.isAvailable });
+    toast({
+      title: item.isAvailable ? 'Menu disembunyikan' : 'Menu ditampilkan',
+      description: `${item.name} sekarang ${item.isAvailable ? 'tidak tersedia' : 'tersedia'} untuk kasir.`,
+    });
   };
 
   // Sync category when selecting
@@ -471,6 +574,11 @@ export default function AdminMenu() {
                 </motion.button>
               </div>
             </div>
+            {menuFormError ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+                {menuFormError}
+              </div>
+            ) : null}
 
             {/* Add Form */}
             <AnimatePresence>

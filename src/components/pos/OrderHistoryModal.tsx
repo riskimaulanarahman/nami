@@ -23,6 +23,7 @@ import { cn } from '@/lib/utils';
 import { usePos } from '@/context/PosContext';
 import { useAuth } from '@/context/AuthContext';
 import type { OrderHistory } from '@/context/PosContext';
+import { useToast } from '@/hooks/use-toast';
 import PrintReceipt from './PrintReceipt';
 
 // ============================================================
@@ -78,6 +79,7 @@ export default function OrderHistoryModal({
 }) {
   const { orderHistory, refundOrder, settings, canTransact } = usePos();
   const { currentStaff, verifyAdminPin } = useAuth();
+  const { toast } = useToast();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<FilterType>('all');
@@ -89,6 +91,7 @@ export default function OrderHistoryModal({
   const [pinValue, setPinValue] = useState('');
   const [pinError, setPinError] = useState('');
   const [emailValue, setEmailValue] = useState('');
+  const [isRefundSubmitting, setIsRefundSubmitting] = useState(false);
   const [printTarget, setPrintTarget] = useState<OrderHistory | null>(null);
   const isAdmin = currentStaff?.role === 'admin';
 
@@ -130,14 +133,29 @@ export default function OrderHistoryModal({
     .filter((o) => o.status === 'refunded')
     .reduce((s, o) => s + o.grandTotal, 0);
 
-  const handleRefund = () => {
-    if (!refundTarget || !currentStaff) return;
+  const handleRefund = async () => {
+    if (!refundTarget || !currentStaff || !refundReason.trim() || isRefundSubmitting) return;
     if (!canTransact) {
       setPinError('Buka shift kasir terlebih dahulu untuk refund.');
       return;
     }
-    refundOrder(refundTarget.id, refundReason, { id: currentStaff.id, name: currentStaff.name });
-    setRefundStep('success');
+    setIsRefundSubmitting(true);
+    try {
+      await refundOrder(refundTarget.id, refundReason, { id: currentStaff.id, name: currentStaff.name });
+      setRefundStep('success');
+      toast({
+        title: 'Refund berhasil',
+        description: 'Alasan / remarks refund tersimpan ke database.',
+      });
+    } catch (error) {
+      toast({
+        title: 'Refund gagal',
+        description: error instanceof Error ? error.message : 'Terjadi kesalahan saat memproses refund.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsRefundSubmitting(false);
+    }
   };
 
   const handleCloseRefund = () => {
@@ -147,6 +165,7 @@ export default function OrderHistoryModal({
     setPinValue('');
     setPinError('');
     setEmailValue('');
+    setIsRefundSubmitting(false);
   };
 
   const handleOpenRefund = (order: OrderHistory) => {
@@ -162,8 +181,9 @@ export default function OrderHistoryModal({
     }
   };
 
-  const handlePinVerify = () => {
-    if (verifyAdminPin(pinValue)) {
+  const handlePinVerify = async () => {
+    const valid = await verifyAdminPin(pinValue);
+    if (valid) {
       setRefundStep('confirm');
       setPinError('');
     } else {
@@ -408,8 +428,10 @@ export default function OrderHistoryModal({
                   {refundStep === 'reason' && (
                     <div className="p-6 space-y-4">
                       <div>
-                        <h3 className="text-lg font-bold text-foreground">Alasan Refund</h3>
-                        <p className="text-sm text-muted-foreground mt-1">Berikan alasan refund untuk catatan.</p>
+                        <h3 className="text-lg font-bold text-foreground">Alasan / Remarks Refund</h3>
+                        <p className="text-sm text-muted-foreground mt-1">
+                          Wajib diisi dan akan disimpan ke database sebagai catatan audit refund.
+                        </p>
                       </div>
                       <textarea
                         value={refundReason}
@@ -427,7 +449,7 @@ export default function OrderHistoryModal({
                         </button>
                         <button
                           onClick={handleRefund}
-                          disabled={!refundReason.trim()}
+                          disabled={!refundReason.trim() || isRefundSubmitting}
                           className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-red-600 to-red-500 text-white hover:from-red-500 hover:to-red-400 shadow-lg shadow-red-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
                         >
                           <RotateCcw className="h-4 w-4" />
@@ -452,6 +474,9 @@ export default function OrderHistoryModal({
                         <h3 className="text-lg font-bold text-foreground">Refund Berhasil!</h3>
                         <p className="text-sm text-muted-foreground mt-1">
                           Pesanan <span className="font-semibold text-foreground">{refundTarget.tableName}</span> telah di-refund.
+                        </p>
+                        <p className="text-sm text-muted-foreground mt-2">
+                          Alasan / remarks refund sudah tersimpan ke database.
                         </p>
                         <p className="text-lg font-bold text-emerald-600 dark:text-emerald-400 mt-2">
                           -{formatRupiah(refundTarget.grandTotal)}
@@ -725,17 +750,19 @@ export default function OrderHistoryModal({
                                 {/* Items */}
                                 {order.orders.length > 0 && (
                                   <div className="space-y-1.5">
-                                    {order.orders.map((item) => (
-                                      <div
-                                        key={item.menuItem.id}
-                                        className="flex items-center justify-between text-sm"
-                                      >
-                                        <div className="flex items-center gap-2">
-                                          <span className="text-base">{item.menuItem.emoji}</span>
-                                          <span className="text-foreground">{item.menuItem.name}</span>
-                                          <span className="text-muted-foreground text-xs">x{item.quantity}</span>
+                                    {order.orders.map((item, idx) => (
+                                      <div key={`${item.menuItem.id}-${idx}`}>
+                                        <div className="flex items-center justify-between text-sm">
+                                          <div className="flex items-center gap-2">
+                                            <span className="text-base">{item.menuItem.emoji}</span>
+                                            <span className="text-foreground">{item.menuItem.name}</span>
+                                            <span className="text-muted-foreground text-xs">x{item.quantity}</span>
+                                          </div>
+                                          <span className="font-semibold text-foreground">{formatRupiah(item.subtotal)}</span>
                                         </div>
-                                        <span className="font-semibold text-foreground">{formatRupiah(item.subtotal)}</span>
+                                        {item.note && (
+                                          <p className="ml-8 text-xs text-muted-foreground italic">↳ {item.note}</p>
+                                        )}
                                       </div>
                                     ))}
                                   </div>
@@ -776,12 +803,10 @@ export default function OrderHistoryModal({
                                         {order.refundedAt ? `${formatDate(order.refundedAt)} ${formatTime(order.refundedAt)}` : '-'}
                                       </span>
                                     </div>
-                                    {order.refundReason && (
-                                      <div>
-                                        <span className="text-red-600 dark:text-red-400 font-semibold">Alasan:</span>
-                                        <p className="text-foreground mt-0.5">{order.refundReason}</p>
-                                      </div>
-                                    )}
+                                    <div>
+                                      <span className="text-red-600 dark:text-red-400 font-semibold">Alasan / Remarks Refund</span>
+                                      <p className="text-foreground mt-0.5">{order.refundReason?.trim() || '-'}</p>
+                                    </div>
                                   </div>
                                 )}
 

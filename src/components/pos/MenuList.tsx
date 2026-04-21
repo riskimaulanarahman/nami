@@ -35,6 +35,7 @@ const categoryConfig: Record<MenuItem['category'], { label: string; chip: string
 };
 
 const categoryOrder: MenuItem['category'][] = ['food', 'drink', 'snack'];
+const fallbackCategoryConfig = categoryConfig.food;
 const accentConfig = {
   emerald: {
     activeCard: 'border-emerald-300 bg-emerald-50/80 shadow-[0_12px_30px_rgba(16,185,129,0.12)] dark:border-emerald-500/30 dark:bg-emerald-500/10',
@@ -162,7 +163,7 @@ export default function MenuList({
           Semua ({baseFilteredMenu.length})
         </button>
         {categoryOrder.map((category) => {
-          const config = categoryConfig[category];
+          const config = categoryConfig[category] ?? fallbackCategoryConfig;
           const isActive = activeCategory === category;
           return (
             <button
@@ -189,7 +190,7 @@ export default function MenuList({
             {filteredMenu.map((item) => {
               const stockStatus = getStockStatus(item);
               const isDisabled = stockStatus.status === 'out';
-              const config = categoryConfig[item.category];
+              const config = categoryConfig[item.category] ?? fallbackCategoryConfig;
               const quantity = quantityByItemId[item.id] ?? 0;
               const isSelected = quantity > 0;
 

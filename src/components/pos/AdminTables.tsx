@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Check, Crown, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { usePos } from '@/context/PosContext';
+import { useToast } from '@/hooks/use-toast';
 import type { TableType } from '@/context/PosContext';
 import { TabletActionButton, TabletMetricCard, TabletPage, TabletPagination, TabletPanel, TabletSectionHeader, paginateItems } from './TabletPrimitives';
 
@@ -29,21 +30,43 @@ const PAGE_SIZE = 8;
 
 export default function AdminTables() {
   const { tables, addTable, updateTable, deleteTable } = usePos();
+  const { toast } = useToast();
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<FormData>(emptyForm);
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
   const [page, setPage] = useState(1);
+  const [formError, setFormError] = useState('');
 
   const availableCount = tables.filter((table) => table.status === 'available').length;
   const vipCount = tables.filter((table) => table.type === 'vip').length;
   const paged = useMemo(() => paginateItems(tables, page, PAGE_SIZE), [page, tables]);
 
+  const validateForm = () => {
+    if (!form.name.trim()) return 'Nama meja wajib diisi.';
+    if (form.hourlyRate <= 0) return 'Tarif per jam harus lebih dari 0.';
+    return '';
+  };
+
   const handleAdd = () => {
-    if (!form.name.trim()) return;
+    const validationError = validateForm();
+    if (validationError) {
+      setFormError(validationError);
+      toast({
+        title: 'Data meja belum lengkap',
+        description: validationError,
+        variant: 'destructive',
+      });
+      return;
+    }
     addTable(form);
     setForm(emptyForm);
     setShowForm(false);
+    setFormError('');
+    toast({
+      title: 'Meja ditambahkan',
+      description: `${form.name.trim()} berhasil masuk ke registry meja.`,
+    });
   };
 
   const handleEdit = (id: number) => {
@@ -51,26 +74,56 @@ export default function AdminTables() {
     if (!table) return;
     setForm({ name: table.name, type: table.type, hourlyRate: table.hourlyRate, sessionDurationHours: table.sessionDurationHours });
     setEditingId(id);
+    setFormError('');
   };
 
   const handleSaveEdit = () => {
-    if (!editingId || !form.name.trim()) return;
+    const validationError = validateForm();
+    if (!editingId || validationError) {
+      if (validationError) {
+        setFormError(validationError);
+        toast({
+          title: 'Perubahan meja belum valid',
+          description: validationError,
+          variant: 'destructive',
+        });
+      }
+      return;
+    }
     updateTable(editingId, { name: form.name, type: form.type, hourlyRate: form.hourlyRate, sessionDurationHours: form.sessionDurationHours });
     setEditingId(null);
     setForm(emptyForm);
+    setFormError('');
+    toast({
+      title: 'Meja diperbarui',
+      description: `Data ${form.name.trim()} berhasil diperbarui.`,
+    });
   };
 
   const handleDelete = (id: number) => {
     const table = tables.find((entry) => entry.id === id);
-    if (!table || table.status === 'occupied') return;
+    if (!table) return;
+    if (table.status === 'occupied') {
+      toast({
+        title: 'Meja tidak bisa dihapus',
+        description: 'Meja yang sedang dipakai harus dikosongkan lebih dulu.',
+        variant: 'destructive',
+      });
+      return;
+    }
     deleteTable(id);
     setDeleteConfirm(null);
+    toast({
+      title: 'Meja dihapus',
+      description: `${table.name} berhasil dihapus dari registry.`,
+    });
   };
 
   const cancelForm = () => {
     setShowForm(false);
     setEditingId(null);
     setForm(emptyForm);
+    setFormError('');
   };
 
   return (
@@ -96,6 +149,11 @@ export default function AdminTables() {
           title="Konfigurasi Meja"
           subtitle="Tambah atau edit meja aktif tanpa meninggalkan workspace."
         />
+        {formError ? (
+          <div className="rounded-[14px] border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+            {formError}
+          </div>
+        ) : null}
 
         <AnimatePresence>
           {showForm && (

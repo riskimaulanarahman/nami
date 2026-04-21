@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { usePos } from '@/context/PosContext';
+import { useToast } from '@/hooks/use-toast';
 import type { Ingredient, IngredientUnit } from '@/context/PosContext';
 import { cn } from '@/lib/utils';
 import {
@@ -70,11 +71,13 @@ export default function AdminInventory() {
     stockAdjustments,
   } = usePos();
   const { currentStaff } = useAuth();
+  const { toast } = useToast();
 
   const [search, setSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingIng, setEditingIng] = useState<Ingredient | null>(null);
   const [adjustingIng, setAdjustingIng] = useState<AdjustableIngredient | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [showLog, setShowLog] = useState(false);
   const [logFilter, setLogFilter] = useState<'all' | 'in' | 'out' | 'adjustment'>('all');
   const [ingredientPage, setIngredientPage] = useState(1);
@@ -98,6 +101,15 @@ export default function AdminInventory() {
     () => ingredients.reduce((sum, ingredient) => sum + ingredient.stock * ingredient.unitCost, 0),
     [ingredients]
   );
+
+  const handleDeleteIngredient = (ingredient: Ingredient) => {
+    deleteIngredient(ingredient.id);
+    setDeleteConfirmId(null);
+    toast({
+      title: 'Bahan dihapus',
+      description: `${ingredient.name} berhasil dihapus dari inventaris.`,
+    });
+  };
 
   return (
     <TabletPage
@@ -255,15 +267,32 @@ export default function AdminInventory() {
                         >
                           <Edit3 className="h-4 w-4" />
                         </button>
-                        <button
-                          onClick={() => {
-                            if (confirm(`Hapus ${ingredient.name}?`)) deleteIngredient(ingredient.id);
-                          }}
-                          className="flex h-8 w-8 items-center justify-center rounded-[12px] bg-rose-100 text-rose-600 transition-colors hover:bg-rose-200 dark:bg-rose-500/15 dark:text-rose-300"
-                          title="Hapus"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                        {deleteConfirmId === ingredient.id ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleDeleteIngredient(ingredient)}
+                              className="rounded-[10px] bg-rose-500 px-2 py-1 text-[10px] font-bold text-white"
+                              title="Konfirmasi hapus"
+                            >
+                              Ya
+                            </button>
+                            <button
+                              onClick={() => setDeleteConfirmId(null)}
+                              className="rounded-[10px] bg-slate-200 px-2 py-1 text-[10px] font-bold text-slate-700 dark:bg-white/10 dark:text-slate-300"
+                              title="Batal hapus"
+                            >
+                              Batal
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setDeleteConfirmId(ingredient.id)}
+                            className="flex h-8 w-8 items-center justify-center rounded-[12px] bg-rose-100 text-rose-600 transition-colors hover:bg-rose-200 dark:bg-rose-500/15 dark:text-rose-300"
+                            title="Hapus"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -426,8 +455,16 @@ export default function AdminInventory() {
             onSave={(data) => {
               if (editingIng) {
                 updateIngredient(editingIng.id, data);
+                toast({
+                  title: 'Bahan diperbarui',
+                  description: `${data.name ?? editingIng.name} berhasil diperbarui.`,
+                });
               } else {
                 addIngredient(data as Omit<Ingredient, 'id' | 'lastRestocked'>);
+                toast({
+                  title: 'Bahan ditambahkan',
+                  description: `${data.name ?? 'Bahan baru'} berhasil ditambahkan ke inventaris.`,
+                });
               }
               setShowAddModal(false);
               setEditingIng(null);
@@ -447,6 +484,10 @@ export default function AdminInventory() {
             staffName={currentStaff?.name ?? 'Admin'}
             onAdjust={(type, quantity, reason) => {
               adjustStock(adjustingIng.id, type, quantity, reason, currentStaff?.name ?? 'Admin');
+              toast({
+                title: 'Stok diperbarui',
+                description: `${adjustingIng.name}: ${type === 'in' ? 'masuk' : type === 'out' ? 'keluar' : 'koreksi'} ${quantity} ${UNIT_LABELS[adjustingIng.unit]}.`,
+              });
               setAdjustingIng(null);
             }}
             onClose={() => setAdjustingIng(null)}
@@ -466,18 +507,31 @@ function IngredientFormModal({
   onSave: (data: Partial<Ingredient>) => void;
   onClose: () => void;
 }) {
+  const { toast } = useToast();
   const [name, setName] = useState(ingredient?.name ?? '');
   const [unit, setUnit] = useState<IngredientUnit>(ingredient?.unit ?? 'pcs');
   const [stock, setStock] = useState(String(ingredient?.stock ?? 0));
   const [minStock, setMinStock] = useState(String(ingredient?.minStock ?? 0));
   const [unitCost, setUnitCost] = useState(String(ingredient?.unitCost ?? 0));
+  const [error, setError] = useState('');
 
   const inputClass =
     'w-full rounded-[12px] border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-950 outline-none transition-colors focus:border-slate-950 dark:border-white/10 dark:bg-white/5 dark:text-white dark:focus:border-white';
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim()) {
+      const message = 'Nama bahan wajib diisi.';
+      setError(message);
+      toast({ title: 'Data bahan belum lengkap', description: message, variant: 'destructive' });
+      return;
+    }
+    if ((parseFloat(stock) || 0) < 0 || (parseFloat(minStock) || 0) < 0 || (parseFloat(unitCost) || 0) < 0) {
+      const message = 'Stok, minimum stok, dan harga satuan tidak boleh negatif.';
+      setError(message);
+      toast({ title: 'Data bahan belum valid', description: message, variant: 'destructive' });
+      return;
+    }
 
     onSave({
       name: name.trim(),
@@ -571,6 +625,11 @@ function IngredientFormModal({
                   className={inputClass}
                 />
               </div>
+              {error ? (
+                <p className="rounded-[12px] border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+                  {error}
+                </p>
+              ) : null}
               <div className="flex gap-2 pt-2">
                 <TabletActionButton type="button" tone="secondary" className="flex-1" onClick={onClose}>
                   Batal
@@ -597,9 +656,11 @@ function StockAdjustModal({
   onAdjust: (type: 'in' | 'out' | 'adjustment', qty: number, reason: string) => void;
   onClose: () => void;
 }) {
+  const { toast } = useToast();
   const [type, setType] = useState<'in' | 'out' | 'adjustment'>(ingredient._forceType ?? 'in');
   const [quantity, setQuantity] = useState('');
   const [reason, setReason] = useState(REASONS[0]);
+  const [error, setError] = useState('');
 
   const inputClass =
     'w-full rounded-[12px] border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-950 outline-none transition-colors focus:border-slate-950 dark:border-white/10 dark:bg-white/5 dark:text-white dark:focus:border-white';
@@ -607,7 +668,18 @@ function StockAdjustModal({
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     const qty = parseFloat(quantity);
-    if (!qty || qty <= 0) return;
+    if (!qty || qty <= 0) {
+      const message = 'Jumlah stok harus lebih dari 0.';
+      setError(message);
+      toast({ title: 'Adjustment belum valid', description: message, variant: 'destructive' });
+      return;
+    }
+    if (!reason.trim()) {
+      const message = 'Alasan adjustment wajib dipilih.';
+      setError(message);
+      toast({ title: 'Adjustment belum valid', description: message, variant: 'destructive' });
+      return;
+    }
     onAdjust(type, qty, reason);
   };
 
@@ -689,6 +761,11 @@ function StockAdjustModal({
                   </option>
                 ))}
               </select>
+              {error ? (
+                <p className="rounded-[12px] border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+                  {error}
+                </p>
+              ) : null}
               <div className="flex gap-2 pt-2">
                 <TabletActionButton type="button" tone="secondary" className="flex-1" onClick={onClose}>
                   Batal

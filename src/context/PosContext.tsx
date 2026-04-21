@@ -3,6 +3,29 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { intervalToDuration } from 'date-fns';
 import { useAuth } from './AuthContext';
+import { useToast } from '@/hooks/use-toast';
+import * as api from '@/lib/posApi';
+import {
+  mapTable,
+  mapTableLayoutPosition,
+  mapMenuItem,
+  mapMenuCategory,
+  mapIngredient,
+  mapStockAdjustment,
+  mapPaymentOptionList,
+  mapBilliardPackage,
+  mapOpenBill,
+  mapOrderHistory,
+  mapDraftReceiptDocument,
+  mapCashierShift,
+  mapCashierShiftExpense,
+  mapWaitingListEntry,
+  mapMember,
+  mapMemberPointLedger,
+  mapBusinessSettings,
+} from '@/lib/posMappers';
+
+// ── Type Definitions (unchanged) ──────────────────────────────────────────────
 
 export type TableStatus = 'available' | 'occupied' | 'reserved';
 export type TableType = 'standard' | 'vip';
@@ -67,6 +90,7 @@ export interface StockAdjustment {
 export interface OrderItem {
   menuItem: MenuItem;
   quantity: number;
+  note?: string;
   addedAt: Date;
 }
 
@@ -128,7 +152,7 @@ export interface OrderHistoryGroup {
   fulfillmentType: FulfillmentType;
   tableId: number | null;
   tableName: string | null;
-  items: { menuItem: MenuItem; quantity: number; subtotal: number }[];
+  items: { menuItem: MenuItem; quantity: number; subtotal: number; note?: string }[];
   subtotal: number;
 }
 
@@ -150,7 +174,7 @@ export interface OrderHistory {
   selectedPackageName: string | null;
   selectedPackageHours: number;
   selectedPackagePrice: number;
-  orders: { menuItem: MenuItem; quantity: number; subtotal: number }[];
+  orders: { menuItem: MenuItem; quantity: number; subtotal: number; note?: string }[];
   groups: OrderHistoryGroup[];
   orderTotal: number;
   grandTotal: number;
@@ -181,6 +205,66 @@ export interface OrderHistory {
   createdAt: Date;
 }
 
+export interface ReceiptDocumentItem {
+  menuItemId: string;
+  name: string;
+  emoji: string;
+  quantity: number;
+  unitPrice: number;
+  subtotal: number;
+  addedAt: Date | null;
+  note?: string;
+}
+
+export interface ReceiptDocumentGroup {
+  id: string;
+  fulfillmentType: FulfillmentType;
+  tableId: number | null;
+  tableName: string | null;
+  subtotal: number;
+  items: ReceiptDocumentItem[];
+}
+
+export interface ReceiptDocumentTotals {
+  rentalCost: number;
+  orderTotal: number;
+  redeemAmount: number;
+  taxPercent: number;
+  taxAmount: number;
+  grandTotalBeforeTax: number;
+  finalTotal: number;
+}
+
+export interface DraftReceiptDocument {
+  kind: 'draft-open-bill';
+  id: string;
+  code: string;
+  status: 'open' | 'closed';
+  tableName: string;
+  tableType: TableType | null;
+  sessionType: SessionType;
+  billType: BillType;
+  billiardBillingMode: BilliardBillingMode | null;
+  selectedPackageName: string | null;
+  selectedPackageHours: number;
+  durationMinutes: number;
+  paymentMethodName: string | null;
+  paymentReference: string | null;
+  servedBy: string;
+  memberName: string | null;
+  memberCode: string | null;
+  customerName: string;
+  pointsEarned: number;
+  pointsRedeemed: number;
+  startTime: Date;
+  endTime: Date;
+  createdAt: Date;
+  updatedAt: Date;
+  draftLabel: string;
+  groups: ReceiptDocumentGroup[];
+  totals: ReceiptDocumentTotals;
+}
+
 export interface CashierShift {
   id: string;
   staffId: string;
@@ -196,12 +280,34 @@ export interface CashierShift {
   cashRefunds: number;
   nonCashSales: number;
   nonCashRefunds: number;
+  totalExpenses: number;
   transactionCount: number;
   refundCount: number;
   involvedStaffIds: string[];
   involvedStaffNames: string[];
   note: string | null;
   isLegacy: boolean;
+}
+
+export type ExpenseCategory =
+  | 'operational'
+  | 'supplies'
+  | 'utilities'
+  | 'transport'
+  | 'food_staff'
+  | 'other';
+
+export interface CashierShiftExpense {
+  id: string;
+  cashierShiftId: string;
+  staffId: string;
+  staffName: string;
+  amount: number;
+  description: string;
+  category: ExpenseCategory;
+  createdAt: Date;
+  deletedAt?: Date;
+  deleteReason?: string;
 }
 
 export interface OpenBill {
@@ -273,6 +379,11 @@ export interface ReceiptPrintSettings {
   showPrintTime: boolean;
 }
 
+export interface PrinterModeSettings {
+  enabled: boolean;
+  paperSize: '58mm' | '80mm';
+}
+
 export interface BusinessSettings {
   name: string;
   address: string;
@@ -281,6 +392,10 @@ export interface BusinessSettings {
   paperSize: '58mm' | '80mm';
   footerMessage: string;
   receiptPrint: ReceiptPrintSettings;
+  printerSettings: {
+    cashier: PrinterModeSettings;
+    kitchen: PrinterModeSettings;
+  };
 }
 
 export interface PosContextType {
@@ -304,7 +419,7 @@ export interface PosContextType {
   closeCashierShift: (payload: { closingCash: number; note?: string | null }) => CashierShift;
   settings: BusinessSettings;
   updateSettings: (settings: Partial<BusinessSettings>) => void;
-  endSessionWithHistory: (tableId: number, staff: { id: string; name: string }, paymentMethodId?: string | null, paymentMethodName?: string | null, paymentReference?: string | null) => OrderHistory;
+  endSessionWithHistory: (tableId: number, staff: { id: string; name: string }, paymentMethodId?: string | null, paymentMethodName?: string | null, paymentReference?: string | null) => Promise<OrderHistory>;
   setMenuItems: (items: MenuItem[]) => void;
   addMenuItem: (item: MenuItem) => void;
   updateMenuItem: (id: string, updates: Partial<MenuItem>) => void;
@@ -330,18 +445,21 @@ export interface PosContextType {
   createOpenBill: (initial?: { tableId?: number | null; customerName?: string; waitingListEntryId?: string | null }) => OpenBill | null;
   createOpenBillForTable: (tableId: number) => OpenBill | null;
   updateOpenBill: (billId: string, updates: Partial<OpenBill>) => void;
+  saveOpenBillDraft: (billId: string) => Promise<OpenBill>;
+  fetchOpenBillReceipt: (billId: string) => Promise<DraftReceiptDocument>;
   deleteOpenBill: (billId: string) => void;
   assignTableToOpenBill: (billId: string, tableId: number) => void;
   addItemToOpenBill: (billId: string, fulfillmentType: FulfillmentType, menuItem: MenuItem) => void;
   removeItemFromOpenBill: (billId: string, fulfillmentType: FulfillmentType, menuItemId: string) => void;
   updateOpenBillItemQuantity: (billId: string, fulfillmentType: FulfillmentType, menuItemId: string, quantity: number) => void;
+  updateOpenBillItemNote: (billId: string, fulfillmentType: FulfillmentType, menuItemId: string, note: string) => void;
   getOpenBillTotals: (bill: OpenBill) => { subtotal: number; redeemableSubtotal: number; pointsRedeemed: number; redeemAmount: number; tax: number; total: number };
-  checkoutOpenBill: (billId: string, staff: { id: string; name: string }, paymentMethodId?: string | null, paymentMethodName?: string | null, paymentReference?: string | null) => OrderHistory;
+  checkoutOpenBill: (billId: string, staff: { id: string; name: string }, paymentMethodId?: string | null, paymentMethodName?: string | null, paymentReference?: string | null) => Promise<OrderHistory>;
   waitingList: WaitingListEntry[];
-  addWaitingListEntry: (entry: Omit<WaitingListEntry, 'id' | 'status' | 'createdAt' | 'seatedAt' | 'tableId'>) => void;
-  updateWaitingListEntry: (entryId: string, updates: Partial<WaitingListEntry>) => void;
-  cancelWaitingListEntry: (entryId: string) => void;
-  seatWaitingListEntry: (entryId: string, tableId: number) => number | null;
+  addWaitingListEntry: (entry: Omit<WaitingListEntry, 'id' | 'status' | 'createdAt' | 'seatedAt' | 'tableId'>) => Promise<void>;
+  updateWaitingListEntry: (entryId: string, updates: Partial<WaitingListEntry>) => Promise<void>;
+  cancelWaitingListEntry: (entryId: string) => Promise<void>;
+  seatWaitingListEntry: (entryId: string, tableId: number) => Promise<number | null>;
   billiardPackages: BilliardPackage[];
   activeBilliardPackages: BilliardPackage[];
   addBilliardPackage: (pkg: Omit<BilliardPackage, 'id'>) => void;
@@ -353,7 +471,10 @@ export interface PosContextType {
   updateMember: (id: string, updates: Partial<Member>) => void;
   deleteMember: (id: string) => void;
   attachMemberToOpenBill: (billId: string, memberId: string | null) => void;
-  refundOrder: (orderId: string, reason: string, refundedBy: { id: string; name: string }) => boolean;
+  refundOrder: (orderId: string, reason: string, refundedBy: { id: string; name: string }) => Promise<OrderHistory>;
+  currentShiftExpenses: CashierShiftExpense[];
+  addShiftExpense: (amount: number, description: string, category: ExpenseCategory) => Promise<void>;
+  deleteShiftExpense: (expenseId: string, deleteReason: string) => Promise<void>;
   paymentOptions: PaymentOption[];
   activePaymentOptions: PaymentOption[];
   addPaymentOption: (opt: Omit<PaymentOption, 'id'>) => void;
@@ -365,1017 +486,466 @@ export interface PosContextType {
   resetTableLayout: () => void;
 }
 
-const STORAGE_KEY = 'pos-store:v2';
+// ── Constants ──────────────────────────────────────────────────────────────────
+
 const POINTS_PER_RUPIAH = 10000;
 const POINT_VALUE_RUPIAH = 100;
 const MAX_REDEEM_PERCENT = 0.5;
 
-const INITIAL_TABLES: Table[] = [
-  { id: 1, name: 'Meja 1', type: 'standard', status: 'available', hourlyRate: 25000, sessionDurationHours: 0, startTime: null, sessionType: null, orders: [], activeOpenBillId: null, billingMode: null, selectedPackageId: null, selectedPackageName: null, selectedPackageHours: 0, selectedPackagePrice: 0, packageReminderShownAt: null, originCashierShiftId: null, originStaffId: null, originStaffName: null, involvedStaffIds: [], involvedStaffNames: [] },
-  { id: 2, name: 'Meja 2', type: 'standard', status: 'available', hourlyRate: 25000, sessionDurationHours: 0, startTime: null, sessionType: null, orders: [], activeOpenBillId: null, billingMode: null, selectedPackageId: null, selectedPackageName: null, selectedPackageHours: 0, selectedPackagePrice: 0, packageReminderShownAt: null, originCashierShiftId: null, originStaffId: null, originStaffName: null, involvedStaffIds: [], involvedStaffNames: [] },
-  { id: 3, name: 'Meja 3', type: 'standard', status: 'available', hourlyRate: 25000, sessionDurationHours: 0, startTime: null, sessionType: null, orders: [], activeOpenBillId: null, billingMode: null, selectedPackageId: null, selectedPackageName: null, selectedPackageHours: 0, selectedPackagePrice: 0, packageReminderShownAt: null, originCashierShiftId: null, originStaffId: null, originStaffName: null, involvedStaffIds: [], involvedStaffNames: [] },
-  { id: 4, name: 'VIP 1', type: 'vip', status: 'available', hourlyRate: 50000, sessionDurationHours: 0, startTime: null, sessionType: null, orders: [], activeOpenBillId: null, billingMode: null, selectedPackageId: null, selectedPackageName: null, selectedPackageHours: 0, selectedPackagePrice: 0, packageReminderShownAt: null, originCashierShiftId: null, originStaffId: null, originStaffName: null, involvedStaffIds: [], involvedStaffNames: [] },
-  { id: 5, name: 'VIP 2', type: 'vip', status: 'available', hourlyRate: 50000, sessionDurationHours: 0, startTime: null, sessionType: null, orders: [], activeOpenBillId: null, billingMode: null, selectedPackageId: null, selectedPackageName: null, selectedPackageHours: 0, selectedPackagePrice: 0, packageReminderShownAt: null, originCashierShiftId: null, originStaffId: null, originStaffName: null, involvedStaffIds: [], involvedStaffNames: [] },
-];
-
-const INITIAL_TABLE_LAYOUT: Record<number, TableLayoutPosition> = {
-  1: { xPercent: 8, yPercent: 14, widthPercent: 26 },
-  2: { xPercent: 37, yPercent: 16, widthPercent: 26 },
-  3: { xPercent: 66, yPercent: 14, widthPercent: 26 },
-  4: { xPercent: 22, yPercent: 56, widthPercent: 26 },
-  5: { xPercent: 54, yPercent: 56, widthPercent: 26 },
+const DEFAULT_SETTINGS: BusinessSettings = {
+  name: '', address: '', phone: '', taxPercent: 0, paperSize: '58mm', footerMessage: '',
+  receiptPrint: { showTaxLine: true, showCashier: true, showPaymentInfo: true, showMemberInfo: true, showPrintTime: true },
+  printerSettings: {
+    cashier: { enabled: true, paperSize: '80mm' },
+    kitchen: { enabled: false, paperSize: '58mm' },
+  },
 };
 
-const INITIAL_CATEGORIES: MenuCategory[] = [
-  { id: 'cat-1', name: 'Makanan', emoji: '🍜', description: 'Menu makanan berat dan ringan', isActive: true },
-  { id: 'cat-2', name: 'Minuman', emoji: '☕', description: 'Aneka minuman dingin dan hangat', isActive: true },
-  { id: 'cat-3', name: 'Snack', emoji: '🍟', description: 'Camilan dan makanan ringan', isActive: true },
-];
-
-const INITIAL_INGREDIENTS: Ingredient[] = [
-  { id: 'ing-1', name: 'Mie Instan', unit: 'bungkus', stock: 50, minStock: 10, unitCost: 3000, lastRestocked: null },
-  { id: 'ing-2', name: 'Telur Ayam', unit: 'pcs', stock: 100, minStock: 20, unitCost: 2500, lastRestocked: null },
-  { id: 'ing-3', name: 'Nasi Putih', unit: 'porsi', stock: 30, minStock: 10, unitCost: 5000, lastRestocked: null },
-  { id: 'ing-4', name: 'Kopi Bubuk', unit: 'gram', stock: 500, minStock: 100, unitCost: 200, lastRestocked: null },
-  { id: 'ing-5', name: 'Susu Segar', unit: 'ml', stock: 2000, minStock: 500, unitCost: 15, lastRestocked: null },
-  { id: 'ing-6', name: 'Gula Pasir', unit: 'gram', stock: 1000, minStock: 200, unitCost: 15, lastRestocked: null },
-  { id: 'ing-7', name: 'Teh Celup', unit: 'pcs', stock: 200, minStock: 50, unitCost: 500, lastRestocked: null },
-  { id: 'ing-8', name: 'Alpukat', unit: 'pcs', stock: 15, minStock: 5, unitCost: 8000, lastRestocked: null },
-  { id: 'ing-9', name: 'Air Mineral 600ml', unit: 'botol', stock: 48, minStock: 12, unitCost: 3000, lastRestocked: null },
-  { id: 'ing-10', name: 'Kentang', unit: 'kg', stock: 5, minStock: 2, unitCost: 15000, lastRestocked: null },
-  { id: 'ing-11', name: 'Minyak Goreng', unit: 'liter', stock: 5, minStock: 2, unitCost: 18000, lastRestocked: null },
-  { id: 'ing-12', name: 'Cireng Frozen', unit: 'pcs', stock: 40, minStock: 10, unitCost: 4000, lastRestocked: null },
-  { id: 'ing-13', name: 'Tahu Putih', unit: 'pcs', stock: 30, minStock: 10, unitCost: 1500, lastRestocked: null },
-  { id: 'ing-14', name: 'Ubi Jalar', unit: 'kg', stock: 3, minStock: 1, unitCost: 12000, lastRestocked: null },
-  { id: 'ing-15', name: 'Mie Ayam Baso', unit: 'porsi', stock: 25, minStock: 10, unitCost: 10000, lastRestocked: null },
-  { id: 'ing-16', name: 'Gula Aren', unit: 'ml', stock: 500, minStock: 100, unitCost: 25, lastRestocked: null },
-];
-
-const INITIAL_MENU_ITEMS: MenuItem[] = [
-  { id: 'f1', name: 'Indomie Goreng', category: 'food', categoryId: 'cat-1', price: 15000, cost: 5500, emoji: '🍜', description: 'Indomie goreng spesial dengan telur mata sapi', recipe: [{ ingredientId: 'ing-1', quantity: 1 }, { ingredientId: 'ing-2', quantity: 1 }], isAvailable: true },
-  { id: 'f2', name: 'Indomie Rebus', category: 'food', categoryId: 'cat-1', price: 15000, cost: 5500, emoji: '🍲', description: 'Indomie rebus kuah hangat dengan sayuran', recipe: [{ ingredientId: 'ing-1', quantity: 1 }, { ingredientId: 'ing-2', quantity: 1 }], isAvailable: true },
-  { id: 'f3', name: 'Nasi Goreng', category: 'food', categoryId: 'cat-1', price: 20000, cost: 7500, emoji: '🍛', description: 'Nasi goreng spesial dengan ayam suwir', recipe: [{ ingredientId: 'ing-3', quantity: 1 }, { ingredientId: 'ing-2', quantity: 1 }], isAvailable: true },
-  { id: 'f4', name: 'Mie Ayam', category: 'food', categoryId: 'cat-1', price: 18000, cost: 10000, emoji: '🍝', description: 'Mie ayam dengan bakso dan pangsit', recipe: [{ ingredientId: 'ing-15', quantity: 1 }], isAvailable: true },
-  { id: 'd1', name: 'Kopi Hitam', category: 'drink', categoryId: 'cat-2', price: 12000, cost: 2000, emoji: '☕', description: 'Kopi hitam pilihan robusta Toraja', recipe: [{ ingredientId: 'ing-4', quantity: 10 }, { ingredientId: 'ing-6', quantity: 5 }], isAvailable: true },
-  { id: 'd2', name: 'Kopi Susu', category: 'drink', categoryId: 'cat-2', price: 15000, cost: 2750, emoji: '☕', description: 'Es kopi susu creamy gula aren', recipe: [{ ingredientId: 'ing-4', quantity: 10 }, { ingredientId: 'ing-5', quantity: 50 }, { ingredientId: 'ing-16', quantity: 10 }], isAvailable: true },
-  { id: 'd3', name: 'Teh Manis', category: 'drink', categoryId: 'cat-2', price: 8000, cost: 575, emoji: '🧊', description: 'Es teh manis segar dingin', recipe: [{ ingredientId: 'ing-7', quantity: 1 }, { ingredientId: 'ing-6', quantity: 15 }], isAvailable: true },
-  { id: 'd4', name: 'Teh Tarik', category: 'drink', categoryId: 'cat-2', price: 12000, cost: 1250, emoji: '🍵', description: 'Teh tarik khas Malaysia dengan susu', recipe: [{ ingredientId: 'ing-7', quantity: 1 }, { ingredientId: 'ing-5', quantity: 50 }, { ingredientId: 'ing-6', quantity: 10 }], isAvailable: true },
-  { id: 'd5', name: 'Jus Alpukat', category: 'drink', categoryId: 'cat-2', price: 18000, cost: 9500, emoji: '🥤', description: 'Jus alpukat segar dengan susu coklat', recipe: [{ ingredientId: 'ing-8', quantity: 1 }, { ingredientId: 'ing-5', quantity: 100 }, { ingredientId: 'ing-6', quantity: 10 }], isAvailable: true },
-  { id: 'd6', name: 'Air Mineral', category: 'drink', categoryId: 'cat-2', price: 5000, cost: 3000, emoji: '💧', description: 'Air mineral botol 600ml', recipe: [{ ingredientId: 'ing-9', quantity: 1 }], isAvailable: true },
-  { id: 's1', name: 'Kentang Goreng', category: 'snack', categoryId: 'cat-3', price: 15000, cost: 6300, emoji: '🍟', description: 'French fries crispy dengan saus sambal', recipe: [{ ingredientId: 'ing-10', quantity: 0.3 }, { ingredientId: 'ing-11', quantity: 0.1 }], isAvailable: true },
-  { id: 's2', name: 'Cireng Isi', category: 'snack', categoryId: 'cat-3', price: 12000, cost: 5400, emoji: '🥟', description: 'Cireng goreng isi ayam suwir pedas', recipe: [{ ingredientId: 'ing-12', quantity: 3 }, { ingredientId: 'ing-11', quantity: 0.1 }], isAvailable: true },
-  { id: 's3', name: 'Tahu Crispy', category: 'snack', categoryId: 'cat-3', price: 10000, cost: 2700, emoji: '🧈', description: 'Tahu goreng crispy dengan bumbu tabur', recipe: [{ ingredientId: 'ing-13', quantity: 3 }, { ingredientId: 'ing-11', quantity: 0.05 }], isAvailable: true },
-  { id: 's4', name: 'Ubi Goreng', category: 'snack', categoryId: 'cat-3', price: 10000, cost: 5400, emoji: '🍠', description: 'Ubi goreng crispy manis keju', recipe: [{ ingredientId: 'ing-14', quantity: 0.3 }, { ingredientId: 'ing-11', quantity: 0.1 }], isAvailable: true },
-];
-
-const INITIAL_PAYMENT_OPTIONS: PaymentOption[] = [
-  { id: 'pm-cash', name: 'Cash', type: 'cash', icon: '💵', isActive: true, requiresReference: false, referenceLabel: '', parentId: null, isGroup: false },
-  { id: 'pm-qris', name: 'QRIS', type: 'qris', icon: '📱', isActive: true, requiresReference: false, referenceLabel: '', parentId: null, isGroup: true },
-  { id: 'pm-qris-bca', name: 'BCA', type: 'qris', icon: '🏦', isActive: true, requiresReference: false, referenceLabel: '', parentId: 'pm-qris', isGroup: false },
-  { id: 'pm-qris-mandiri', name: 'Mandiri', type: 'qris', icon: '🏦', isActive: true, requiresReference: false, referenceLabel: '', parentId: 'pm-qris', isGroup: false },
-  { id: 'pm-qris-bri', name: 'BRI', type: 'qris', icon: '🏦', isActive: true, requiresReference: false, referenceLabel: '', parentId: 'pm-qris', isGroup: false },
-  { id: 'pm-qris-bni', name: 'BNI', type: 'qris', icon: '🏦', isActive: true, requiresReference: false, referenceLabel: '', parentId: 'pm-qris', isGroup: false },
-  { id: 'pm-qris-cimb', name: 'CIMB Niaga', type: 'qris', icon: '🏦', isActive: true, requiresReference: false, referenceLabel: '', parentId: 'pm-qris', isGroup: false },
-  { id: 'pm-transfer-bank', name: 'Transfer Bank', type: 'transfer', icon: '🏦', isActive: true, requiresReference: true, referenceLabel: 'No. Referensi Transfer', parentId: null, isGroup: false },
-  { id: 'pm-gojek', name: 'Gojek', type: 'transfer', icon: '🛵', isActive: true, requiresReference: true, referenceLabel: 'No. Pesanan Gojek', parentId: null, isGroup: false },
-  { id: 'pm-grab', name: 'Grab', type: 'transfer', icon: '🛺', isActive: true, requiresReference: true, referenceLabel: 'No. Pesanan Grab', parentId: null, isGroup: false },
-  { id: 'pm-shopeefood', name: 'ShopeeFood', type: 'transfer', icon: '🛍️', isActive: true, requiresReference: true, referenceLabel: 'No. Pesanan ShopeeFood', parentId: null, isGroup: false },
-];
-
-const INITIAL_BILLIARD_PACKAGES: BilliardPackage[] = [
-  { id: 'pkg-1', name: 'Paket 1 Jam', durationHours: 1, price: 25000, isActive: true },
-  { id: 'pkg-2', name: 'Paket 2 Jam', durationHours: 2, price: 45000, isActive: true },
-  { id: 'pkg-3', name: 'Paket 3 Jam', durationHours: 3, price: 65000, isActive: true },
-];
-
-const INITIAL_MEMBERS: Member[] = [
-  { id: 'mem-1', code: 'MBR-001', name: 'Andi Pratama', phone: '081200001111', tier: 'Bronze', pointsBalance: 80, createdAt: new Date(), updatedAt: new Date() },
-  { id: 'mem-2', code: 'MBR-002', name: 'Salsa Putri', phone: '081200002222', tier: 'Silver', pointsBalance: 320, createdAt: new Date(), updatedAt: new Date() },
-];
-
-const INITIAL_RECEIPT_PRINT_SETTINGS: ReceiptPrintSettings = {
-  showTaxLine: true,
-  showCashier: true,
-  showPaymentInfo: true,
-  showMemberInfo: true,
-  showPrintTime: true,
-};
-
-const INITIAL_SETTINGS: BusinessSettings = {
-  name: 'Rumah Billiard & Cafe',
-  address: 'Jl. Merdeka No. 123, Jakarta',
-  phone: '0812-3456-7890',
-  taxPercent: 0,
-  paperSize: '58mm',
-  footerMessage: 'Terima kasih atas kunjungan Anda!',
-  receiptPrint: INITIAL_RECEIPT_PRINT_SETTINGS,
-};
-
-function mergeBusinessSettings(settings?: Partial<BusinessSettings> | null): BusinessSettings {
-  if (!settings) return INITIAL_SETTINGS;
-  return {
-    ...INITIAL_SETTINGS,
-    ...settings,
-    receiptPrint: {
-      ...INITIAL_RECEIPT_PRINT_SETTINGS,
-      ...(settings.receiptPrint ?? {}),
-    },
-  };
-}
-
-function normalizePaymentOptions(options: PaymentOption[]): PaymentOption[] {
-  const normalized = options.map((option) => {
-    if (option.id === 'pm-qris') {
-      return {
-        ...option,
-        name: option.name || 'QRIS',
-        parentId: null,
-        isGroup: true,
-      };
-    }
-    if (option.type === 'qris' && option.id.startsWith('pm-qris-')) {
-      const bankName = option.name.replace(/^QRIS\s+/i, '').trim() || option.name;
-      return {
-        ...option,
-        name: bankName,
-        parentId: 'pm-qris',
-        isGroup: false,
-        requiresReference: false,
-        referenceLabel: '',
-      };
-    }
-    return {
-      ...option,
-      parentId: option.parentId ?? null,
-      isGroup: option.isGroup ?? false,
-    };
-  });
-
-  const hasQrisGroup = normalized.some((option) => option.id === 'pm-qris');
-  if (!hasQrisGroup && normalized.some((option) => option.type === 'qris')) {
-    normalized.splice(1, 0, {
-      id: 'pm-qris',
-      name: 'QRIS',
-      type: 'qris',
-      icon: '📱',
-      isActive: true,
-      requiresReference: false,
-      referenceLabel: '',
-      parentId: null,
-      isGroup: true,
-    });
-  }
-
-  return normalized;
-}
-
-function safeDate(value: unknown): Date | null {
-  if (!value) return null;
-  const date = new Date(value as string);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function computeExpectedCash(shift: Pick<CashierShift, 'openingCash' | 'cashSales' | 'cashRefunds'>): number {
-  return shift.openingCash + shift.cashSales - shift.cashRefunds;
-}
-
-function dedupeList(values: string[]): string[] {
-  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
-}
-
-function parseServedByChain(servedBy: string): string[] {
-  return dedupeList(servedBy.split('->').map((item) => item.trim()));
-}
-
-function joinServedByChain(names: string[]): string {
-  return dedupeList(names).join(' -> ');
-}
-
-function mergeInvolvedStaff(
-  involvedStaffIds: string[] | undefined,
-  involvedStaffNames: string[] | undefined,
-  staff: { id: string; name: string } | null
-): { involvedStaffIds: string[]; involvedStaffNames: string[] } {
-  const ids = dedupeList(involvedStaffIds ?? []);
-  const names = dedupeList(involvedStaffNames ?? []);
-  if (!staff) return { involvedStaffIds: ids, involvedStaffNames: names };
-  return {
-    involvedStaffIds: dedupeList([...ids, staff.id]),
-    involvedStaffNames: dedupeList([...names, staff.name]),
-  };
-}
-
-function inferPaymentMethodTypeFromMeta(paymentMethodId?: string | null, paymentMethodName?: string | null): PaymentMethodType {
-  const haystack = `${paymentMethodId ?? ''} ${paymentMethodName ?? ''}`.toLowerCase();
-  if (haystack.includes('cash')) return 'cash';
-  if (haystack.includes('tunai')) return 'cash';
-  return paymentMethodId || paymentMethodName ? 'non-cash' : 'cash';
-}
-
-function normalizeCashierShift(shift: CashierShift): CashierShift {
-  const expectedCash = computeExpectedCash(shift);
-  const closingCash = shift.closingCash ?? null;
-  const fallbackName = shift.staffName?.trim() ? shift.staffName : 'Unknown Staff';
-  const involvedStaffNames = dedupeList(shift.involvedStaffNames ?? [fallbackName]);
-  const involvedStaffIds = dedupeList(shift.involvedStaffIds ?? [shift.staffId]);
-  return {
-    ...shift,
-    openedAt: safeDate(shift.openedAt) ?? new Date(),
-    closedAt: safeDate(shift.closedAt),
-    expectedCash,
-    closingCash,
-    varianceCash: closingCash !== null ? closingCash - expectedCash : null,
-    note: shift.note ?? null,
-    involvedStaffIds,
-    involvedStaffNames,
-    status: shift.status ?? (shift.closedAt ? 'closed' : 'active'),
-    isLegacy: Boolean(shift.isLegacy),
-  };
-}
-
-function getMemberTier(pointsBalance: number): MemberTier {
-  if (pointsBalance >= 500) return 'Gold';
-  if (pointsBalance >= 200) return 'Silver';
-  return 'Bronze';
-}
+// ── Helper functions ───────────────────────────────────────────────────────────
 
 function sumOrderItems(items: OrderItem[]): number {
   return items.reduce((sum, item) => sum + item.menuItem.price * item.quantity, 0);
 }
 
-function orderItemCost(items: OrderItem[]): number {
-  return items.reduce((sum, item) => sum + item.menuItem.cost * item.quantity, 0);
-}
+type R = Record<string, any>;
 
-function reviveOrderItems(items: OrderItem[] | undefined): OrderItem[] {
-  return (items ?? []).map((item) => ({ ...item, addedAt: safeDate(item.addedAt) ?? new Date() }));
-}
-
-function reviveGroups(groups: BillLineGroup[] | OrderHistoryGroup[] | undefined): BillLineGroup[] {
-  return (groups ?? []).map((group) => ({
-    ...group,
-    items: (group.items ?? []).map((item) => ({
-      menuItem: item.menuItem,
-      quantity: item.quantity,
-      addedAt: 'addedAt' in item ? safeDate((item as OrderItem).addedAt) ?? new Date() : new Date(),
-    })),
-    subtotal: group.subtotal ?? (group.items ?? []).reduce((sum, item) => sum + item.subtotal, 0),
-  }));
-}
-
-function flattenGroups(groups: BillLineGroup[]): { menuItem: MenuItem; quantity: number; subtotal: number }[] {
-  return groups.flatMap((group) =>
-    group.items.map((item) => ({
-      menuItem: item.menuItem,
-      quantity: item.quantity,
-      subtotal: item.menuItem.price * item.quantity,
-    }))
-  );
-}
-
-function billTypeFromGroups(groups: BillLineGroup[]): BillType {
-  const hasDineIn = groups.some((group) => group.fulfillmentType === 'dine-in' && group.items.length > 0);
-  const hasTakeaway = groups.some((group) => group.fulfillmentType === 'takeaway' && group.items.length > 0);
-  if (hasDineIn && hasTakeaway) return 'mixed';
-  if (hasDineIn) return 'dine-in';
-  if (hasTakeaway) return 'takeaway';
-  return 'takeaway';
-}
-
-function historyGroupsFromBill(groups: BillLineGroup[]): OrderHistoryGroup[] {
-  return groups
-    .filter((group) => group.items.length > 0)
-    .sort((a, b) => a.fulfillmentType.localeCompare(b.fulfillmentType))
-    .map((group) => ({
-      id: group.id,
-      fulfillmentType: group.fulfillmentType,
-      tableId: group.tableId,
-      tableName: group.tableName,
-      items: group.items.map((item) => ({
-        menuItem: item.menuItem,
-        quantity: item.quantity,
-        subtotal: item.menuItem.price * item.quantity,
-      })),
-      subtotal: sumOrderItems(group.items),
-    }))
-    .sort((a, b) => {
-      if (a.fulfillmentType === b.fulfillmentType) return 0;
-      return a.fulfillmentType === 'dine-in' ? -1 : 1;
-    });
-}
-
-function createOpenBillCode(index: number): string {
-  return `OB-${String(index).padStart(3, '0')}`;
-}
+// ── Context ────────────────────────────────────────────────────────────────────
 
 const PosContext = createContext<PosContextType | undefined>(undefined);
 
 export function PosProvider({ children }: { children: React.ReactNode }) {
-  const { currentStaff, staffList } = useAuth();
-  const [tables, setTables] = useState<Table[]>(INITIAL_TABLES);
-  const [menuItems, setMenuItems] = useState<MenuItem[]>(INITIAL_MENU_ITEMS);
+  const { currentStaff } = useAuth();
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  const [tables, setTables] = useState<Table[]>([]);
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [activeModalTableId, setActiveModalTableIdState] = useState<number | null>(null);
   const [elapsedMinutes, setElapsedMinutes] = useState<Record<number, number>>({});
   const [orderHistory, setOrderHistory] = useState<OrderHistory[]>([]);
   const [cashierShifts, setCashierShifts] = useState<CashierShift[]>([]);
-  const [settings, setSettings] = useState<BusinessSettings>(INITIAL_SETTINGS);
-  const [categories, setCategories] = useState<MenuCategory[]>(INITIAL_CATEGORIES);
-  const [ingredients, setIngredients] = useState<Ingredient[]>(INITIAL_INGREDIENTS);
+  const [settings, setSettings] = useState<BusinessSettings>(DEFAULT_SETTINGS);
+  const [categories, setCategories] = useState<MenuCategory[]>([]);
+  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
   const [stockAdjustments, setStockAdjustments] = useState<StockAdjustment[]>([]);
-  const [paymentOptions, setPaymentOptions] = useState<PaymentOption[]>(INITIAL_PAYMENT_OPTIONS);
-  const [billiardPackages, setBilliardPackages] = useState<BilliardPackage[]>(INITIAL_BILLIARD_PACKAGES);
+  const [paymentOptions, setPaymentOptions] = useState<PaymentOption[]>([]);
+  const [billiardPackages, setBilliardPackages] = useState<BilliardPackage[]>([]);
   const [openBills, setOpenBills] = useState<OpenBill[]>([]);
   const [activeOpenBillId, setActiveOpenBillIdState] = useState<string | null>(null);
   const [waitingList, setWaitingList] = useState<WaitingListEntry[]>([]);
-  const [members, setMembers] = useState<Member[]>(INITIAL_MEMBERS);
+  const [members, setMembers] = useState<Member[]>([]);
   const [memberPointLedger, setMemberPointLedger] = useState<MemberPointLedger[]>([]);
-  const [tableLayout, setTableLayout] = useState<Record<number, TableLayoutPosition>>(INITIAL_TABLE_LAYOUT);
+  const [tableLayout, setTableLayout] = useState<Record<number, TableLayoutPosition>>({});
+  const [currentShiftExpenses, setCurrentShiftExpenses] = useState<CashierShiftExpense[]>([]);
   const [hydrated, setHydrated] = useState(false);
+  const [loading, setLoading] = useState(false);
 
+  const { toast } = useToast();
+
+  // ── Refs ────────────────────────────────────────────────────────────────────
   const tablesRef = useRef(tables);
   const openBillsRef = useRef(openBills);
-  const billiardPackagesRef = useRef(billiardPackages);
   const membersRef = useRef(members);
   const settingsRef = useRef(settings);
-  const orderHistoryRef = useRef(orderHistory);
-  const cashierShiftsRef = useRef(cashierShifts);
   const paymentOptionsRef = useRef(paymentOptions);
   const currentStaffRef = useRef(currentStaff);
   const activeCashierShiftRef = useRef<CashierShift | null>(null);
-  const staffListRef = useRef(staffList);
+  const openBillTaskChainsRef = useRef<Map<string, Promise<unknown>>>(new Map());
+  const openBillCanonicalIdRef = useRef<Map<string, string>>(new Map());
+  const openBillQueueKeyRef = useRef<Map<string, string>>(new Map());
+  const openBillCreateResolutionRef = useRef<Map<string, Promise<string>>>(new Map());
 
   useEffect(() => { tablesRef.current = tables; }, [tables]);
   useEffect(() => { openBillsRef.current = openBills; }, [openBills]);
-  useEffect(() => { billiardPackagesRef.current = billiardPackages; }, [billiardPackages]);
   useEffect(() => { membersRef.current = members; }, [members]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
-  useEffect(() => { orderHistoryRef.current = orderHistory; }, [orderHistory]);
-  useEffect(() => { cashierShiftsRef.current = cashierShifts; }, [cashierShifts]);
   useEffect(() => { paymentOptionsRef.current = paymentOptions; }, [paymentOptions]);
   useEffect(() => { currentStaffRef.current = currentStaff; }, [currentStaff]);
-  useEffect(() => { staffListRef.current = staffList; }, [staffList]);
 
+  // ── Derived state ──────────────────────────────────────────────────────────
   const activeCashierShift = useMemo(
-    () => cashierShifts.find((shift) => shift.status === 'active') ?? null,
-    [cashierShifts]
+    () => cashierShifts.find((s) => s.status === 'active') ?? null,
+    [cashierShifts],
   );
   const canTransact = Boolean(currentStaff && activeCashierShift && activeCashierShift.staffId === currentStaff.id);
-  useEffect(() => {
-    activeCashierShiftRef.current = activeCashierShift;
-  }, [activeCashierShift]);
+  useEffect(() => { activeCashierShiftRef.current = activeCashierShift; }, [activeCashierShift]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
+  const lowStockIngredients = ingredients.filter((i) => i.stock <= i.minStock);
+  const activePaymentOptions = paymentOptions.filter((p) => p.isActive && p.parentId === null);
+  const activeBilliardPackages = billiardPackages.filter((p) => p.isActive);
+
+  // ── Data Refresh Helpers ───────────────────────────────────────────────────
+
+  const refreshTables = useCallback(async () => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        setHydrated(true);
-        return;
-      }
-      const parsed = JSON.parse(raw) as Partial<{
-        tables: Table[];
-        menuItems: MenuItem[];
-        orderHistory: OrderHistory[];
-        settings: Partial<BusinessSettings>;
-        categories: MenuCategory[];
-        ingredients: Ingredient[];
-        stockAdjustments: StockAdjustment[];
-        paymentOptions: PaymentOption[];
-        billiardPackages: BilliardPackage[];
-        openBills: OpenBill[];
-        activeOpenBillId: string | null;
-        waitingList: WaitingListEntry[];
-        members: Member[];
-        memberPointLedger: MemberPointLedger[];
-        tableLayout: Record<number, TableLayoutPosition>;
-        cashierShifts: CashierShift[];
-      }>;
-
-      if (parsed.tables) {
-        setTables(parsed.tables.map((table) => ({
-          ...table,
-          startTime: safeDate(table.startTime),
-          orders: reviveOrderItems(table.orders),
-          activeOpenBillId: table.activeOpenBillId ?? null,
-          billingMode: table.billingMode ?? null,
-          selectedPackageId: table.selectedPackageId ?? null,
-          selectedPackageName: table.selectedPackageName ?? null,
-          selectedPackageHours: table.selectedPackageHours ?? 0,
-          selectedPackagePrice: table.selectedPackagePrice ?? 0,
-          packageReminderShownAt: safeDate(table.packageReminderShownAt),
-          originCashierShiftId: table.originCashierShiftId ?? null,
-          originStaffId: table.originStaffId ?? null,
-          originStaffName: table.originStaffName ?? null,
-          involvedStaffIds: dedupeList(table.involvedStaffIds?.length ? table.involvedStaffIds : (table.originStaffId ? [table.originStaffId] : [])),
-          involvedStaffNames: dedupeList(table.involvedStaffNames?.length ? table.involvedStaffNames : (table.originStaffName ? [table.originStaffName] : [])),
-        })));
-      }
-      if (parsed.menuItems) setMenuItems(parsed.menuItems);
-      let revivedOrderHistory: OrderHistory[] = [];
-      if (parsed.orderHistory) {
-        revivedOrderHistory = parsed.orderHistory.map((order) => ({
-          ...order,
-          startTime: safeDate(order.startTime) ?? new Date(),
-          endTime: safeDate(order.endTime) ?? new Date(),
-          refundedAt: safeDate(order.refundedAt),
-          createdAt: safeDate(order.createdAt) ?? new Date(),
-          billiardBillingMode: order.billiardBillingMode ?? (order.billType === 'open-bill' || order.billType === 'package' ? order.billType : null),
-          selectedPackageId: order.selectedPackageId ?? null,
-          selectedPackageName: order.selectedPackageName ?? null,
-          selectedPackageHours: order.selectedPackageHours ?? order.sessionDurationHours ?? 0,
-          selectedPackagePrice: order.selectedPackagePrice ?? 0,
-          groups: historyGroupsFromBill(reviveGroups(order.groups)),
-          paymentMethodType: order.paymentMethodType ?? inferPaymentMethodTypeFromMeta(order.paymentMethodId, order.paymentMethodName),
-          cashierShiftId: order.cashierShiftId ?? null,
-          refundedInCashierShiftId: order.refundedInCashierShiftId ?? null,
-          originCashierShiftId: order.originCashierShiftId ?? order.cashierShiftId ?? null,
-          originStaffId: order.originStaffId ?? null,
-          originStaffName: order.originStaffName ?? null,
-          involvedStaffIds: dedupeList(order.involvedStaffIds?.length ? order.involvedStaffIds : (order.originStaffId ? [order.originStaffId] : [])),
-          involvedStaffNames: dedupeList(
-            order.involvedStaffNames?.length
-              ? order.involvedStaffNames
-              : parseServedByChain(order.servedBy)
-          ),
-          isContinuedFromPreviousShift: Boolean(
-            order.isContinuedFromPreviousShift
-            ?? (order.originCashierShiftId && order.cashierShiftId && order.originCashierShiftId !== order.cashierShiftId)
-          ),
-        }));
-        revivedOrderHistory = revivedOrderHistory.map((order) => {
-          const inferredNames = order.involvedStaffNames.length ? order.involvedStaffNames : parseServedByChain(order.servedBy);
-          const normalizedNames = dedupeList(inferredNames.length ? inferredNames : [order.servedBy]);
-          return {
-            ...order,
-            originStaffName: order.originStaffName ?? normalizedNames[0] ?? order.servedBy,
-            involvedStaffNames: normalizedNames,
-            involvedStaffIds: dedupeList(order.involvedStaffIds?.length ? order.involvedStaffIds : (order.originStaffId ? [order.originStaffId] : [])),
-            servedBy: joinServedByChain(normalizedNames),
-          };
-        });
-      }
-      let revivedCashierShifts: CashierShift[] = [];
-      if (parsed.cashierShifts?.length) {
-        revivedCashierShifts = parsed.cashierShifts.map((shift) => normalizeCashierShift(shift));
-      }
-
-      if (!revivedCashierShifts.length && revivedOrderHistory.length > 0) {
-        const shiftByCashierName = new Map<string, CashierShift>();
-        const sortedOrders = [...revivedOrderHistory].sort(
-          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-        );
-
-        sortedOrders.forEach((order) => {
-          const shiftOwnerName = (
-            order.originStaffName
-            ?? order.involvedStaffNames[0]
-            ?? parseServedByChain(order.servedBy)[0]
-            ?? order.servedBy
-          ).trim() || 'unknown';
-          const key = shiftOwnerName.toLowerCase() || 'unknown';
-          const staff = staffListRef.current.find((item) => item.name.trim().toLowerCase() === key) ?? null;
-          const paymentMethodType = order.paymentMethodType ?? inferPaymentMethodTypeFromMeta(order.paymentMethodId, order.paymentMethodName);
-          const openedAt = new Date(order.createdAt);
-          const closedAt = new Date(order.refundedAt ?? order.createdAt);
-          const currentShift = shiftByCashierName.get(key);
-          if (!currentShift) {
-            shiftByCashierName.set(key, {
-              id: `legacy-shift-${Date.now()}-${shiftByCashierName.size + 1}`,
-              staffId: staff?.id ?? `legacy-${key.replace(/\s+/g, '-')}`,
-              staffName: shiftOwnerName,
-              status: 'legacy',
-              openedAt,
-              closedAt,
-              openingCash: 0,
-              closingCash: 0,
-              expectedCash: 0,
-              varianceCash: 0,
-              cashSales: order.status === 'completed' && paymentMethodType === 'cash' ? order.grandTotal : 0,
-              cashRefunds: order.status === 'refunded' && paymentMethodType === 'cash' ? order.grandTotal : 0,
-              nonCashSales: order.status === 'completed' && paymentMethodType === 'non-cash' ? order.grandTotal : 0,
-              nonCashRefunds: order.status === 'refunded' && paymentMethodType === 'non-cash' ? order.grandTotal : 0,
-              transactionCount: order.status === 'completed' ? 1 : 0,
-              refundCount: order.status === 'refunded' ? 1 : 0,
-              involvedStaffIds: staff?.id ? [staff.id] : [],
-              involvedStaffNames: dedupeList(order.involvedStaffNames.length ? order.involvedStaffNames : [shiftOwnerName]),
-              note: 'Migrasi otomatis dari data order lama',
-              isLegacy: true,
-            });
-            return;
-          }
-
-          currentShift.openedAt = currentShift.openedAt < openedAt ? currentShift.openedAt : openedAt;
-          currentShift.closedAt = currentShift.closedAt && currentShift.closedAt > closedAt ? currentShift.closedAt : closedAt;
-          if (order.status === 'completed') {
-            if (paymentMethodType === 'cash') currentShift.cashSales += order.grandTotal;
-            else currentShift.nonCashSales += order.grandTotal;
-            currentShift.transactionCount += 1;
-          } else if (order.status === 'refunded') {
-            if (paymentMethodType === 'cash') currentShift.cashRefunds += order.grandTotal;
-            else currentShift.nonCashRefunds += order.grandTotal;
-            currentShift.refundCount += 1;
-          }
-          currentShift.involvedStaffNames = dedupeList([
-            ...currentShift.involvedStaffNames,
-            ...(order.involvedStaffNames.length ? order.involvedStaffNames : [shiftOwnerName]),
-          ]);
-        });
-
-        revivedCashierShifts = Array.from(shiftByCashierName.values()).map((shift) => {
-          const expectedCash = computeExpectedCash(shift);
-          return {
-            ...shift,
-            expectedCash,
-            closingCash: expectedCash,
-            varianceCash: 0,
-            status: 'legacy',
-          };
-        });
-        const byStaffName = new Map(
-          revivedCashierShifts.map((shift) => [shift.staffName.trim().toLowerCase(), shift.id])
-        );
-        revivedOrderHistory = revivedOrderHistory.map((order) => {
-          const ownerName = (order.originStaffName ?? order.involvedStaffNames[0] ?? parseServedByChain(order.servedBy)[0] ?? order.servedBy).trim();
-          const key = ownerName.toLowerCase();
-          const legacyShiftId = byStaffName.get(key) ?? null;
-          const cashierShiftId = order.cashierShiftId ?? legacyShiftId;
-          return {
-            ...order,
-            cashierShiftId,
-            refundedInCashierShiftId: order.refundedInCashierShiftId ?? (order.status === 'refunded' ? legacyShiftId : null),
-            originCashierShiftId: order.originCashierShiftId ?? legacyShiftId,
-            originStaffName: order.originStaffName ?? ownerName,
-            involvedStaffNames: dedupeList(order.involvedStaffNames.length ? order.involvedStaffNames : [ownerName]),
-            isContinuedFromPreviousShift: Boolean(order.originCashierShiftId && cashierShiftId && order.originCashierShiftId !== cashierShiftId),
-          };
-        });
-      }
-      if (revivedOrderHistory.length > 0) setOrderHistory(revivedOrderHistory);
-      if (revivedCashierShifts.length > 0) setCashierShifts(revivedCashierShifts.map((shift) => normalizeCashierShift(shift)));
-      if (parsed.settings) setSettings(mergeBusinessSettings(parsed.settings));
-      if (parsed.categories) setCategories(parsed.categories);
-      if (parsed.ingredients) {
-        setIngredients(parsed.ingredients.map((ingredient) => ({
-          ...ingredient,
-          lastRestocked: safeDate(ingredient.lastRestocked),
-        })));
-      }
-      if (parsed.stockAdjustments) {
-        setStockAdjustments(parsed.stockAdjustments.map((adjustment) => ({
-          ...adjustment,
-          createdAt: safeDate(adjustment.createdAt) ?? new Date(),
-        })));
-      }
-      if (parsed.paymentOptions) {
-        setPaymentOptions(normalizePaymentOptions(parsed.paymentOptions));
-      }
-      if (parsed.billiardPackages) setBilliardPackages(parsed.billiardPackages);
-      if (parsed.openBills) {
-        setOpenBills(parsed.openBills.map((bill) => ({
-          ...bill,
-          createdAt: safeDate(bill.createdAt) ?? new Date(),
-          updatedAt: safeDate(bill.updatedAt) ?? new Date(),
-          groups: reviveGroups(bill.groups),
-          originCashierShiftId: bill.originCashierShiftId ?? null,
-          originStaffId: bill.originStaffId ?? null,
-          originStaffName: bill.originStaffName ?? null,
-          involvedStaffIds: dedupeList(bill.involvedStaffIds?.length ? bill.involvedStaffIds : (bill.originStaffId ? [bill.originStaffId] : [])),
-          involvedStaffNames: dedupeList(bill.involvedStaffNames?.length ? bill.involvedStaffNames : (bill.originStaffName ? [bill.originStaffName] : [])),
-        })));
-      }
-      setActiveOpenBillIdState(parsed.activeOpenBillId ?? null);
-      if (parsed.waitingList) {
-        setWaitingList(parsed.waitingList.map((entry) => ({
-          ...entry,
-          createdAt: safeDate(entry.createdAt) ?? new Date(),
-          seatedAt: safeDate(entry.seatedAt),
-          tableId: entry.tableId ?? null,
-        })));
-      }
-      if (parsed.members) {
-        setMembers(parsed.members.map((member) => ({
-          ...member,
-          createdAt: safeDate(member.createdAt) ?? new Date(),
-          updatedAt: safeDate(member.updatedAt) ?? new Date(),
-          tier: getMemberTier(member.pointsBalance),
-        })));
-      }
-      if (parsed.memberPointLedger) {
-        setMemberPointLedger(parsed.memberPointLedger.map((entry) => ({
-          ...entry,
-          createdAt: safeDate(entry.createdAt) ?? new Date(),
-        })));
-      }
-      if (parsed.tableLayout) {
-        setTableLayout(
-          Object.fromEntries(
-            Object.entries(parsed.tableLayout).map(([key, position]) => [
-              Number(key),
-              {
-                xPercent: position.xPercent,
-                yPercent: position.yPercent,
-                widthPercent: position.widthPercent,
-              },
-            ])
-          )
-        );
-      }
-    } catch {
-      // Ignore malformed local storage and fall back to defaults.
-    } finally {
-      setHydrated(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!hydrated || typeof window === 'undefined') return;
-    const payload = {
-      tables,
-      menuItems,
-      orderHistory,
-      settings,
-      categories,
-      ingredients,
-      stockAdjustments,
-      paymentOptions,
-      billiardPackages,
-      openBills,
-      activeOpenBillId,
-      waitingList,
-      members,
-      memberPointLedger,
-      tableLayout,
-      cashierShifts,
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  }, [
-    hydrated,
-    tables,
-    menuItems,
-    orderHistory,
-    settings,
-    categories,
-    ingredients,
-    stockAdjustments,
-    paymentOptions,
-    billiardPackages,
-    openBills,
-    activeOpenBillId,
-    waitingList,
-    members,
-    memberPointLedger,
-    tableLayout,
-    cashierShifts,
-  ]);
-
-  const lowStockIngredients = ingredients.filter((ingredient) => ingredient.stock <= ingredient.minStock);
-
-  const deductStockForMenuItem = useCallback((menuItem: MenuItem) => {
-    setIngredients((prev) => {
-      const next = [...prev];
-      menuItem.recipe.forEach((recipeItem) => {
-        const index = next.findIndex((ingredient) => ingredient.id === recipeItem.ingredientId);
-        if (index !== -1) {
-          next[index] = {
-            ...next[index],
-            stock: Math.max(0, Math.round((next[index].stock - recipeItem.quantity) * 100) / 100),
-          };
+      const res = await api.fetchTables();
+      const mapped = (res.data as R[]).map(mapTable);
+      setTables(mapped);
+      // Extract layout positions from table data
+      const layout: Record<number, TableLayoutPosition> = {};
+      (res.data as R[]).forEach((t: R) => {
+        if (t.layout_position) {
+          layout[t.id] = mapTableLayoutPosition(t.layout_position);
         }
       });
-      return next;
-    });
+      if (Object.keys(layout).length > 0) setTableLayout(layout);
+    } catch (e) { console.error('refreshTables failed:', e); }
   }, []);
 
-  const getOpenBillTotals = useCallback((bill: OpenBill) => {
-    const subtotal = bill.groups.reduce((sum, group) => sum + sumOrderItems(group.items), 0);
-    const redeemableSubtotal = subtotal;
-    const member = membersRef.current.find((item) => item.id === bill.memberId) ?? null;
-    const maxRedeemPoints = Math.floor((redeemableSubtotal * MAX_REDEEM_PERCENT) / POINT_VALUE_RUPIAH);
-    const allowedPoints = Math.min(member?.pointsBalance ?? 0, bill.pointsToRedeem, maxRedeemPoints);
-    const redeemAmount = allowedPoints * POINT_VALUE_RUPIAH;
-    const taxableBase = subtotal - redeemAmount;
-    const tax = settingsRef.current.taxPercent > 0 ? Math.round(taxableBase * (settingsRef.current.taxPercent / 100)) : 0;
-    return {
-      subtotal,
-      redeemableSubtotal,
-      pointsRedeemed: allowedPoints,
-      redeemAmount,
-      tax,
-      total: taxableBase + tax,
-    };
+  const refreshOpenBills = useCallback(async () => {
+    try {
+      const res = await api.fetchOpenBills();
+      setOpenBills((res.data as R[]).map(mapOpenBill));
+    } catch (e) { console.error('refreshOpenBills failed:', e); }
   }, []);
 
-  const resolvePaymentMethodType = useCallback((paymentMethodId?: string | null, paymentMethodName?: string | null): PaymentMethodType => {
-    const option = paymentMethodId
-      ? paymentOptionsRef.current.find((item) => item.id === paymentMethodId) ?? null
-      : null;
-    if (option) {
-      return option.type === 'cash' ? 'cash' : 'non-cash';
+  const refreshOrders = useCallback(async () => {
+    try {
+      const res = await api.fetchOrders();
+      const paginated = res.data as R;
+      const items = paginated.data ?? paginated;
+      setOrderHistory((items as R[]).map(mapOrderHistory));
+    } catch (e) { console.error('refreshOrders failed:', e); }
+  }, []);
+
+  const refreshShifts = useCallback(async () => {
+    try {
+      const res = await api.fetchShifts();
+      const paginated = res.data as R;
+      const items = paginated.data ?? paginated;
+      setCashierShifts((items as R[]).map(mapCashierShift));
+    } catch (e) { console.error('refreshShifts failed:', e); }
+  }, []);
+
+  const refreshWaitingList = useCallback(async () => {
+    try {
+      const res = await api.fetchWaitingList();
+      setWaitingList((res.data as R[]).map(mapWaitingListEntry));
+    } catch (e) { console.error('refreshWaitingList failed:', e); }
+  }, []);
+
+  const refreshMembers = useCallback(async () => {
+    try {
+      const res = await api.fetchMembers();
+      const paginated = res.data as R;
+      const items = paginated.data ?? paginated;
+      setMembers((items as R[]).map(mapMember));
+    } catch (e) { console.error('refreshMembers failed:', e); }
+  }, []);
+
+  const refreshIngredients = useCallback(async () => {
+    try {
+      const res = await api.fetchIngredients();
+      setIngredients((res.data as R[]).map(mapIngredient));
+    } catch (e) { console.error('refreshIngredients failed:', e); }
+  }, []);
+
+  const refreshStockAdjustments = useCallback(async () => {
+    try {
+      const res = await api.fetchStockAdjustments();
+      const paginated = res.data as R;
+      const items = paginated.data ?? paginated;
+      setStockAdjustments((items as R[]).map(mapStockAdjustment));
+    } catch (e) { console.error('refreshStockAdjustments failed:', e); }
+  }, []);
+
+  const refreshMenuItems = useCallback(async () => {
+    try {
+      const res = await api.fetchMenuItems();
+      setMenuItems((res.data as R[]).map(mapMenuItem));
+    } catch (e) { console.error('refreshMenuItems failed:', e); }
+  }, []);
+
+  const refreshCategories = useCallback(async () => {
+    try {
+      const res = await api.fetchCategories();
+      setCategories((res.data as R[]).map(mapMenuCategory));
+    } catch (e) { console.error('refreshCategories failed:', e); }
+  }, []);
+
+  const refreshPaymentOptions = useCallback(async () => {
+    try {
+      const res = await api.fetchPaymentOptions();
+      setPaymentOptions(mapPaymentOptionList(res.data as R[]));
+    } catch (e) { console.error('refreshPaymentOptions failed:', e); }
+  }, []);
+
+  const refreshBilliardPackages = useCallback(async () => {
+    try {
+      const res = await api.fetchBilliardPackages();
+      setBilliardPackages((res.data as R[]).map(mapBilliardPackage));
+    } catch (e) { console.error('refreshBilliardPackages failed:', e); }
+  }, []);
+
+  const refreshSettings = useCallback(async () => {
+    try {
+      const res = await api.fetchSettings();
+      setSettings(mapBusinessSettings(res.data as R));
+    } catch (e) { console.error('refreshSettings failed:', e); }
+  }, []);
+
+  const refreshShiftExpenses = useCallback(async (shiftId: string) => {
+    try {
+      const res = await api.fetchShiftExpenses(shiftId);
+      setCurrentShiftExpenses((res.data as R[]).map(mapCashierShiftExpense));
+    } catch (e) { console.error('refreshShiftExpenses failed:', e); }
+  }, []);
+
+  // Load expenses whenever active shift changes
+  useEffect(() => {
+    if (activeCashierShift?.id) {
+      void refreshShiftExpenses(activeCashierShift.id);
+    } else {
+      setCurrentShiftExpenses([]);
     }
-    return inferPaymentMethodTypeFromMeta(paymentMethodId, paymentMethodName);
-  }, []);
+  }, [activeCashierShift?.id, refreshShiftExpenses]);
 
-  const getCurrentShiftContext = useCallback(() => {
-    const staff = currentStaffRef.current;
-    const shift = activeCashierShiftRef.current;
-    if (!staff || !shift || shift.staffId !== staff.id) return null;
-    return { staff, shift };
-  }, []);
+  // ── Initial data fetch ─────────────────────────────────────────────────────
 
-  const withActorOnTable = useCallback((table: Table, context: NonNullable<ReturnType<typeof getCurrentShiftContext>>): Table => {
-    const mergedActors = mergeInvolvedStaff(table.involvedStaffIds, table.involvedStaffNames, context.staff);
-    return {
-      ...table,
-      originCashierShiftId: table.originCashierShiftId ?? context.shift.id,
-      originStaffId: table.originStaffId ?? context.staff.id,
-      originStaffName: table.originStaffName ?? context.staff.name,
-      involvedStaffIds: mergedActors.involvedStaffIds,
-      involvedStaffNames: mergedActors.involvedStaffNames,
-    };
-  }, []);
-
-  const withActorOnOpenBill = useCallback((bill: OpenBill, context: NonNullable<ReturnType<typeof getCurrentShiftContext>>): OpenBill => {
-    const mergedActors = mergeInvolvedStaff(bill.involvedStaffIds, bill.involvedStaffNames, context.staff);
-    return {
-      ...bill,
-      originCashierShiftId: bill.originCashierShiftId ?? context.shift.id,
-      originStaffId: bill.originStaffId ?? context.staff.id,
-      originStaffName: bill.originStaffName ?? context.staff.name,
-      involvedStaffIds: mergedActors.involvedStaffIds,
-      involvedStaffNames: mergedActors.involvedStaffNames,
-    };
-  }, []);
-
-  const setActiveModalTableId = useCallback((id: number | null) => {
-    if (id !== null) {
-      const table = tablesRef.current.find((item) => item.id === id) ?? null;
-      const context = getCurrentShiftContext();
-      if (table?.status === 'occupied' && context) {
-        setTables((prev) => prev.map((entry) => (entry.id === id ? withActorOnTable(entry, context) : entry)));
+  useEffect(() => {
+    const fetchAll = async () => {
+      // Don't fetch if no staff is logged in (auth token missing)
+      if (!currentStaff) {
+        setHydrated(true); // Still hydrate to show login screen
+        return;
       }
-    }
-    setActiveModalTableIdState(id);
-  }, [getCurrentShiftContext, withActorOnTable]);
 
-  const setActiveOpenBillId = useCallback((id: string | null) => {
-    if (id) {
-      const context = getCurrentShiftContext();
-      if (context) {
-        setOpenBills((prev) => prev.map((bill) => (bill.id === id ? withActorOnOpenBill(bill, context) : bill)));
+      setLoading(true);
+      try {
+        await Promise.all([
+          refreshTables(),
+          refreshMenuItems(),
+          refreshCategories(),
+          refreshBilliardPackages(),
+          refreshPaymentOptions(),
+          refreshSettings(),
+          refreshMembers(),
+          refreshIngredients(),
+          refreshOpenBills(),
+          refreshOrders(),
+          refreshShifts(),
+          refreshWaitingList(),
+          refreshStockAdjustments(),
+        ]);
+      } catch (e) {
+        console.error('Failed to fetch initial POS data:', e);
+        toast({
+          title: 'Gagal memuat data',
+          description: 'Pastikan koneksi internet stabil dan coba lagi.',
+          variant: 'destructive',
+        });
+      } finally {
+        setLoading(true); // Wait, should be false
+        setHydrated(true);
+        setLoading(false);
       }
-    }
-    setActiveOpenBillIdState(id);
-  }, [getCurrentShiftContext, withActorOnOpenBill]);
+    };
+    void fetchAll();
+  }, [currentStaff?.id, refreshTables, refreshMenuItems, refreshCategories, refreshBilliardPackages, refreshPaymentOptions, refreshSettings, refreshMembers, refreshIngredients, refreshOpenBills, refreshOrders, refreshShifts, refreshWaitingList, refreshStockAdjustments, toast]);
 
-  const recordShiftTransaction = useCallback((
-    shiftId: string,
-    amount: number,
-    paymentType: PaymentMethodType,
-    staffInvolvement?: { staffIds?: string[]; staffNames?: string[] },
-  ) => {
-    setCashierShifts((prev) =>
-      prev.map((shift) => {
-        if (shift.id !== shiftId) return shift;
-        const mergedIds = dedupeList([...(shift.involvedStaffIds ?? []), ...(staffInvolvement?.staffIds ?? [])]);
-        const mergedNames = dedupeList([...(shift.involvedStaffNames ?? []), ...(staffInvolvement?.staffNames ?? [])]);
-        const next = {
-          ...shift,
-          cashSales: paymentType === 'cash' ? shift.cashSales + amount : shift.cashSales,
-          nonCashSales: paymentType === 'non-cash' ? shift.nonCashSales + amount : shift.nonCashSales,
-          transactionCount: shift.transactionCount + 1,
-          involvedStaffIds: mergedIds,
-          involvedStaffNames: mergedNames,
-        };
-        return normalizeCashierShift(next);
-      })
-    );
-  }, []);
-
-  const recordShiftRefund = useCallback((
-    shiftId: string,
-    amount: number,
-    paymentType: PaymentMethodType,
-    staffInvolvement?: { staffIds?: string[]; staffNames?: string[] },
-  ) => {
-    setCashierShifts((prev) =>
-      prev.map((shift) => {
-        if (shift.id !== shiftId) return shift;
-        const mergedIds = dedupeList([...(shift.involvedStaffIds ?? []), ...(staffInvolvement?.staffIds ?? [])]);
-        const mergedNames = dedupeList([...(shift.involvedStaffNames ?? []), ...(staffInvolvement?.staffNames ?? [])]);
-        const next = {
-          ...shift,
-          cashRefunds: paymentType === 'cash' ? shift.cashRefunds + amount : shift.cashRefunds,
-          nonCashRefunds: paymentType === 'non-cash' ? shift.nonCashRefunds + amount : shift.nonCashRefunds,
-          refundCount: shift.refundCount + 1,
-          involvedStaffIds: mergedIds,
-          involvedStaffNames: mergedNames,
-        };
-        return normalizeCashierShift(next);
-      })
-    );
-  }, []);
-
-  const openCashierShift = useCallback((payload: { staffId: string; staffName: string; openingCash: number; note?: string | null }): CashierShift => {
-    if (!Number.isFinite(payload.openingCash) || payload.openingCash < 0) {
-      throw new Error('Kas awal harus valid');
-    }
-    if (activeCashierShiftRef.current) {
-      throw new Error('Masih ada shift aktif');
-    }
-    const nextShift: CashierShift = normalizeCashierShift({
-      id: `shift-${Date.now()}`,
-      staffId: payload.staffId,
-      staffName: payload.staffName,
-      status: 'active',
-      openedAt: new Date(),
-      closedAt: null,
-      openingCash: payload.openingCash,
-      closingCash: null,
-      expectedCash: payload.openingCash,
-      varianceCash: null,
-      cashSales: 0,
-      cashRefunds: 0,
-      nonCashSales: 0,
-      nonCashRefunds: 0,
-      transactionCount: 0,
-      refundCount: 0,
-      involvedStaffIds: [payload.staffId],
-      involvedStaffNames: [payload.staffName],
-      note: payload.note ?? null,
-      isLegacy: false,
-    });
-    setCashierShifts((prev) => [nextShift, ...prev]);
-    return nextShift;
-  }, []);
-
-  const closeCashierShift = useCallback((payload: { closingCash: number; note?: string | null }): CashierShift => {
-    if (!Number.isFinite(payload.closingCash) || payload.closingCash < 0) {
-      throw new Error('Kas fisik akhir harus valid');
-    }
-    const context = getCurrentShiftContext();
-    if (!context) throw new Error('Shift aktif tidak ditemukan untuk staff ini');
-
-    const closedShift = normalizeCashierShift({
-      ...context.shift,
-      status: context.shift.isLegacy ? 'legacy' : 'closed',
-      closedAt: new Date(),
-      closingCash: payload.closingCash,
-      note: payload.note ?? context.shift.note,
-    });
-    setCashierShifts((prev) => prev.map((shift) => (shift.id === closedShift.id ? closedShift : shift)));
-    return closedShift;
-  }, [getCurrentShiftContext]);
+  // ── Elapsed timer ──────────────────────────────────────────────────────────
 
   useEffect(() => {
     const intervalId = setInterval(() => {
       const currentTables = tablesRef.current;
       const next: Record<number, number> = {};
       let hasOccupied = false;
-
       currentTables.forEach((table) => {
         if (table.status === 'occupied' && table.startTime) {
           next[table.id] = Math.floor((Date.now() - new Date(table.startTime).getTime()) / 60000);
           hasOccupied = true;
         }
       });
-
       if (hasOccupied) setElapsedMinutes(next);
     }, 1000);
-
     return () => clearInterval(intervalId);
   }, []);
 
   const formatElapsed = useCallback((tableId: number): string => {
-    const table = tablesRef.current.find((item) => item.id === tableId);
+    const table = tablesRef.current.find((t) => t.id === tableId);
     if (!table || table.status !== 'occupied' || !table.startTime) return '00:00:00';
     const duration = intervalToDuration({ start: new Date(table.startTime), end: new Date() });
     return `${String(duration.hours ?? 0).padStart(2, '0')}:${String(duration.minutes ?? 0).padStart(2, '0')}:${String(duration.seconds ?? 0).padStart(2, '0')}`;
   }, []);
 
+  // ── UI state setters ───────────────────────────────────────────────────────
+
+  const setActiveModalTableId = useCallback((id: number | null) => {
+    setActiveModalTableIdState(id);
+  }, []);
+
+  const setActiveOpenBillId = useCallback((id: string | null) => {
+    setActiveOpenBillIdState(id);
+  }, []);
+
+  const upsertOpenBillState = useCallback((nextBill: OpenBill, previousId?: string) => {
+    setOpenBills((prev) => {
+      const remaining = prev.filter((bill) => bill.id !== nextBill.id && bill.id !== previousId);
+      return [nextBill, ...remaining];
+    });
+    if (previousId) {
+      setActiveOpenBillIdState((current) => current === previousId ? nextBill.id : current);
+    }
+  }, []);
+
+  const resolveOpenBillQueueKey = useCallback((billId: string) => {
+    return openBillQueueKeyRef.current.get(billId) ?? billId;
+  }, []);
+
+  const linkOpenBillIdentity = useCallback((sourceBillId: string, canonicalBillId: string) => {
+    const queueKey = resolveOpenBillQueueKey(sourceBillId);
+    openBillCanonicalIdRef.current.set(sourceBillId, canonicalBillId);
+    openBillCanonicalIdRef.current.set(canonicalBillId, canonicalBillId);
+    openBillQueueKeyRef.current.set(sourceBillId, queueKey);
+    openBillQueueKeyRef.current.set(canonicalBillId, queueKey);
+  }, [resolveOpenBillQueueKey]);
+
+  const resolveOpenBillId = useCallback(async (billId: string): Promise<string> => {
+    const knownCanonicalId = openBillCanonicalIdRef.current.get(billId);
+    if (knownCanonicalId) return knownCanonicalId;
+
+    if (!billId.startsWith('pending-')) return billId;
+
+    const resolution = openBillCreateResolutionRef.current.get(billId);
+    if (resolution) {
+      const canonicalBillId = await resolution;
+      linkOpenBillIdentity(billId, canonicalBillId);
+      return canonicalBillId;
+    }
+
+    return billId;
+  }, [linkOpenBillIdentity]);
+
+  const enqueueOpenBillTask = useCallback(function <T>(billId: string, taskFactory: () => Promise<T>): Promise<T> {
+    const queueKey = resolveOpenBillQueueKey(billId);
+    const previousTask = openBillTaskChainsRef.current.get(queueKey) ?? Promise.resolve();
+    const nextTask = previousTask.catch(() => undefined).then(taskFactory);
+
+    openBillTaskChainsRef.current.set(queueKey, nextTask);
+    void nextTask.finally(() => {
+      if (openBillTaskChainsRef.current.get(queueKey) === nextTask) {
+        openBillTaskChainsRef.current.delete(queueKey);
+      }
+    });
+
+    return nextTask;
+  }, [resolveOpenBillQueueKey]);
+
+  const waitForOpenBillSync = useCallback(async (billId: string) => {
+    const queueKey = resolveOpenBillQueueKey(billId);
+    const pendingTask = openBillTaskChainsRef.current.get(queueKey);
+    if (pendingTask) {
+      await pendingTask;
+    }
+  }, [resolveOpenBillQueueKey]);
+
+  const cleanupOpenBillSync = useCallback((billId: string) => {
+    const queueKey = resolveOpenBillQueueKey(billId);
+    const canonicalBillId = openBillCanonicalIdRef.current.get(billId);
+
+    openBillTaskChainsRef.current.delete(queueKey);
+    openBillCreateResolutionRef.current.delete(queueKey);
+    openBillCreateResolutionRef.current.delete(billId);
+    openBillCanonicalIdRef.current.delete(queueKey);
+    openBillCanonicalIdRef.current.delete(billId);
+    openBillQueueKeyRef.current.delete(queueKey);
+    openBillQueueKeyRef.current.delete(billId);
+
+    if (canonicalBillId) {
+      openBillCanonicalIdRef.current.delete(canonicalBillId);
+      openBillQueueKeyRef.current.delete(canonicalBillId);
+    }
+  }, [resolveOpenBillQueueKey]);
+
+  // ── Table Session Operations ───────────────────────────────────────────────
+
   const startSession = useCallback((tableId: number, sessionType: SessionType, config?: { billingMode?: BilliardBillingMode; packageId?: string | null }) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    const actorMeta = mergeInvolvedStaff([], [], context.staff);
-    const selectedPackage = config?.packageId
-      ? billiardPackagesRef.current.find((pkg) => pkg.id === config.packageId) ?? null
-      : null;
-    setTables((prev) =>
-      prev.map((table) =>
-        table.id === tableId
-          ? {
-              ...table,
-              status: 'occupied',
-              startTime: new Date(),
-              sessionType,
-              orders: table.status === 'reserved' ? table.orders : [],
-              billingMode: sessionType === 'billiard' ? (config?.billingMode ?? 'open-bill') : null,
-              selectedPackageId: sessionType === 'billiard' && config?.billingMode === 'package' ? selectedPackage?.id ?? null : null,
-              selectedPackageName: sessionType === 'billiard' && config?.billingMode === 'package' ? selectedPackage?.name ?? null : null,
-              selectedPackageHours: sessionType === 'billiard' && config?.billingMode === 'package' ? selectedPackage?.durationHours ?? 0 : 0,
-              selectedPackagePrice: sessionType === 'billiard' && config?.billingMode === 'package' ? selectedPackage?.price ?? 0 : 0,
-              packageReminderShownAt: null,
-              originCashierShiftId: context.shift.id,
-              originStaffId: context.staff.id,
-              originStaffName: context.staff.name,
-              involvedStaffIds: actorMeta.involvedStaffIds,
-              involvedStaffNames: actorMeta.involvedStaffNames,
-            }
-          : table
-      )
-    );
-    setElapsedMinutes((prev) => ({ ...prev, [tableId]: 0 }));
-  }, [getCurrentShiftContext]);
+    void (async () => {
+      try {
+        await api.startSessionApi(tableId, {
+          session_type: sessionType,
+          billing_mode: sessionType === 'billiard' ? (config?.billingMode ?? 'open-bill') : undefined,
+          package_id: sessionType === 'billiard' && config?.billingMode === 'package' ? config.packageId : undefined,
+        });
+        await refreshTables();
+      } catch (e) {
+        console.error('startSession failed:', e);
+        toast({
+          title: 'Gagal Memulai Sesi',
+          description: e instanceof Error ? e.message : 'Terjadi kesalahan sistem.',
+          variant: 'destructive',
+        });
+        await refreshTables(); // Rollback
+      }
+    })();
+  }, [refreshTables, toast]);
 
   const addOrderItem = useCallback((tableId: number, menuItem: MenuItem) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    setTables((prev) =>
-      prev.map((table) => {
-        if (table.id !== tableId) return table;
-        const tableWithActor = withActorOnTable(table, context);
-        const existing = tableWithActor.orders.find((item) => item.menuItem.id === menuItem.id);
-        if (existing) {
-          return {
-            ...tableWithActor,
-            orders: tableWithActor.orders.map((item) =>
-              item.menuItem.id === menuItem.id ? { ...item, quantity: item.quantity + 1 } : item
-            ),
-          };
-        }
-        return {
-          ...tableWithActor,
-          orders: [...tableWithActor.orders, { menuItem, quantity: 1, addedAt: new Date() }],
-        };
-      })
-    );
-    deductStockForMenuItem(menuItem);
-  }, [deductStockForMenuItem, getCurrentShiftContext, withActorOnTable]);
+    void (async () => {
+      try {
+        await api.addOrderToTable(tableId, menuItem.id);
+        await refreshTables();
+      } catch (e) {
+        console.error('addOrderItem failed:', e);
+        toast({
+          title: 'Gagal Menambah Item',
+          description: e instanceof Error ? e.message : 'Terjadi kesalahan sistem.',
+          variant: 'destructive',
+        });
+        await refreshTables();
+      }
+    })();
+  }, [refreshTables, toast]);
 
   const removeOrderItem = useCallback((tableId: number, menuItemId: string) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    setTables((prev) =>
-      prev.map((table) =>
-        table.id === tableId
-          ? { ...withActorOnTable(table, context), orders: table.orders.filter((item) => item.menuItem.id !== menuItemId) }
-          : table
-      )
-    );
-  }, [getCurrentShiftContext, withActorOnTable]);
+    void (async () => {
+      try {
+        await api.removeOrderFromTable(tableId, menuItemId);
+        await refreshTables();
+      } catch (e) {
+        console.error('removeOrderItem failed:', e);
+        toast({
+          title: 'Gagal Menghapus Item',
+          description: e instanceof Error ? e.message : 'Terjadi kesalahan sistem.',
+          variant: 'destructive',
+        });
+        await refreshTables();
+      }
+    })();
+  }, [refreshTables, toast]);
 
   const updateOrderItemQuantity = useCallback((tableId: number, menuItemId: string, quantity: number) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    if (quantity <= 0) {
-      removeOrderItem(tableId, menuItemId);
-      return;
-    }
-    setTables((prev) =>
-      prev.map((table) =>
-        table.id === tableId
-          ? {
-              ...withActorOnTable(table, context),
-              orders: table.orders.map((item) =>
-                item.menuItem.id === menuItemId ? { ...item, quantity } : item
-              ),
-            }
-          : table
-      )
-    );
-  }, [getCurrentShiftContext, removeOrderItem, withActorOnTable]);
+    void (async () => {
+      try {
+        await api.updateOrderOnTable(tableId, menuItemId, quantity);
+        await refreshTables();
+      } catch (e) {
+        console.error('updateOrderItemQuantity failed:', e);
+        toast({
+          title: 'Gagal Update Kuantitas',
+          description: e instanceof Error ? e.message : 'Terjadi kesalahan sistem.',
+          variant: 'destructive',
+        });
+        await refreshTables();
+      }
+    })();
+  }, [refreshTables, toast]);
 
   const endSession = useCallback((tableId: number) => {
-    if (!getCurrentShiftContext()) return;
-    setTables((prev) =>
-      prev.map((table) =>
-        table.id === tableId
-          ? {
-              ...table,
-              status: 'available',
-              startTime: null,
-              sessionType: null,
-              orders: [],
-              billingMode: null,
-              selectedPackageId: null,
-              selectedPackageName: null,
-              selectedPackageHours: 0,
-              selectedPackagePrice: 0,
-              packageReminderShownAt: null,
-              originCashierShiftId: null,
-              originStaffId: null,
-              originStaffName: null,
-              involvedStaffIds: [],
-              involvedStaffNames: [],
-            }
-          : table
-      )
-    );
-    setElapsedMinutes((prev) => {
-      const next = { ...prev };
-      delete next[tableId];
-      return next;
-    });
-  }, [getCurrentShiftContext]);
+    void (async () => {
+      try {
+        await api.endSessionApi(tableId);
+        await refreshTables();
+      } catch (e) {
+        console.error('endSession failed:', e);
+        toast({
+          title: 'Gagal Mengakhiri Sesi',
+          description: e instanceof Error ? e.message : 'Terjadi kesalahan sistem.',
+          variant: 'destructive',
+        });
+        await refreshTables();
+      }
+    })();
+  }, [refreshTables, toast]);
 
   const calculateTableBill = useCallback((table: Table) => {
     let durationMinutes = 0;
@@ -1386,7 +956,21 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     const rentalCost = isFlatRate
       ? table.selectedPackagePrice
       : Math.ceil((durationMinutes / 60) * table.hourlyRate);
-    const orderTotal = table.orders.reduce((sum, item) => sum + item.menuItem.price * item.quantity, 0);
+
+    const billiardOrderTotal = table.orders.reduce((sum, item) => sum + item.menuItem.price * item.quantity, 0);
+
+    // Sum Open Bill items if linked
+    let openBillOrderTotal = 0;
+    if (table.activeOpenBillId) {
+      const linkedBill = openBillsRef.current.find((b) => b.id === table.activeOpenBillId);
+      const linkedGroup = linkedBill?.groups.find((g) => g.tableId === table.id);
+      if (linkedGroup) {
+        openBillOrderTotal = linkedGroup.items.reduce((sum, item) => sum + item.menuItem.price * item.quantity, 0);
+      }
+    }
+
+    const orderTotal = billiardOrderTotal + openBillOrderTotal;
+
     return {
       rentalCost,
       orderTotal,
@@ -1400,960 +984,912 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const endSessionWithHistory = useCallback((tableId: number, staff: { id: string; name: string }, paymentMethodId?: string | null, paymentMethodName?: string | null, paymentReference?: string | null): OrderHistory => {
-    const context = getCurrentShiftContext();
-    if (!context || context.staff.id !== staff.id) {
-      throw new Error('Transaksi dikunci sampai shift kasir aktif');
+  const endSessionWithHistory = useCallback(async (
+    tableId: number,
+    _staff: { id: string; name: string },
+    paymentMethodId?: string | null,
+    paymentMethodName?: string | null,
+    paymentReference?: string | null
+  ): Promise<OrderHistory> => {
+    try {
+      const res = await api.checkoutTableApi(tableId, {
+        payment_method_id: paymentMethodId,
+        payment_method_name: paymentMethodName,
+        payment_reference: paymentReference,
+      });
+      const order = mapOrderHistory(res.data as R);
+      await Promise.all([refreshTables(), refreshOrders(), refreshShifts()]);
+      return order;
+    } catch (e) {
+      console.error('endSessionWithHistory failed:', e);
+      await refreshTables();
+      throw (e instanceof Error ? e : new Error('Terjadi kesalahan sistem saat memproses pembayaran.'));
     }
-    const currentTable = tablesRef.current.find((table) => table.id === tableId);
-    if (!currentTable) throw new Error(`Table ${tableId} not found`);
-    const tableForCheckout = withActorOnTable(currentTable, context);
+  }, [refreshTables, refreshOrders, refreshShifts]);
 
-    const now = new Date();
-    const start = tableForCheckout.startTime ?? now;
-    const durationMinutes = Math.floor((now.getTime() - start.getTime()) / 60000);
-    const isFlatRate = tableForCheckout.billingMode === 'package';
-    const rentalCost = isFlatRate
-      ? tableForCheckout.selectedPackagePrice
-      : Math.ceil((durationMinutes / 60) * tableForCheckout.hourlyRate);
-    const groups: OrderHistoryGroup[] = tableForCheckout.orders.length > 0
-      ? [{
-          id: `group-billiard-${tableId}`,
-          fulfillmentType: 'dine-in',
-          tableId: tableForCheckout.id,
-          tableName: tableForCheckout.name,
-          items: tableForCheckout.orders.map((item) => ({
-            menuItem: item.menuItem,
-            quantity: item.quantity,
-            subtotal: item.menuItem.price * item.quantity,
-          })),
-          subtotal: sumOrderItems(tableForCheckout.orders),
-        }]
-      : [];
-    const orderTotal = groups.reduce((sum, group) => sum + group.subtotal, 0);
-    const paymentType = resolvePaymentMethodType(paymentMethodId, paymentMethodName);
-    const involvedStaffIds = dedupeList(tableForCheckout.involvedStaffIds);
-    const involvedStaffNames = dedupeList(tableForCheckout.involvedStaffNames.length ? tableForCheckout.involvedStaffNames : [staff.name]);
-    const historyEntry: OrderHistory = {
-      id: `order-${Date.now()}`,
-      tableId: tableForCheckout.id,
-      tableName: tableForCheckout.name,
-      tableType: tableForCheckout.type,
-      sessionType: tableForCheckout.sessionType ?? 'billiard',
-      billType: tableForCheckout.billingMode ?? 'billiard',
-      billiardBillingMode: tableForCheckout.billingMode,
-      startTime: start,
-      endTime: now,
-      durationMinutes,
-      sessionDurationHours: tableForCheckout.selectedPackageHours,
-      rentalCost,
-      selectedPackageId: tableForCheckout.selectedPackageId,
-      selectedPackageName: tableForCheckout.selectedPackageName,
-      selectedPackageHours: tableForCheckout.selectedPackageHours,
-      selectedPackagePrice: tableForCheckout.selectedPackagePrice,
-      orders: flattenGroups(reviveGroups(groups)),
-      groups,
-      orderTotal,
-      grandTotal: rentalCost + orderTotal,
-      orderCost: orderItemCost(tableForCheckout.orders),
-      servedBy: joinServedByChain(involvedStaffNames),
-      status: 'completed',
-      refundedAt: null,
-      refundedBy: null,
-      refundReason: null,
-      paymentMethodId: paymentMethodId ?? null,
-      paymentMethodName: paymentMethodName ?? null,
-      paymentMethodType: paymentType,
-      paymentReference: paymentReference ?? null,
-      cashierShiftId: context.shift.id,
-      refundedInCashierShiftId: null,
-      originCashierShiftId: tableForCheckout.originCashierShiftId ?? context.shift.id,
-      originStaffId: tableForCheckout.originStaffId ?? context.staff.id,
-      originStaffName: tableForCheckout.originStaffName ?? context.staff.name,
-      involvedStaffIds,
-      involvedStaffNames,
-      isContinuedFromPreviousShift: (tableForCheckout.originCashierShiftId ?? context.shift.id) !== context.shift.id,
-      memberId: null,
-      memberCode: null,
-      memberName: null,
-      pointsEarned: 0,
-      pointsRedeemed: 0,
-      redeemAmount: 0,
-      createdAt: now,
+  // ── Cashier Shift Operations ───────────────────────────────────────────────
+
+  const openCashierShift = useCallback((payload: { staffId: string; staffName: string; openingCash: number; note?: string | null }): CashierShift => {
+    const placeholder: CashierShift = {
+      id: `pending-${Date.now()}`, staffId: payload.staffId, staffName: payload.staffName,
+      status: 'active', openedAt: new Date(), closedAt: null,
+      openingCash: payload.openingCash, closingCash: null, expectedCash: payload.openingCash,
+      varianceCash: null, cashSales: 0, cashRefunds: 0, nonCashSales: 0, nonCashRefunds: 0,
+      totalExpenses: 0, transactionCount: 0, refundCount: 0,
+      involvedStaffIds: [payload.staffId], involvedStaffNames: [payload.staffName],
+      note: payload.note ?? null, isLegacy: false,
+    };
+    // Optimistic update
+    setCashierShifts((prev) => [placeholder, ...prev]);
+
+    void (async () => {
+      try {
+        await api.openShiftApi({ opening_cash: payload.openingCash, note: payload.note });
+        await refreshShifts();
+      } catch (e) {
+        console.error('openCashierShift failed:', e);
+        toast({
+          title: 'Gagal Buka Shift',
+          description: e instanceof Error ? e.message : 'Pastikan saldo modal sudah benar.',
+          variant: 'destructive',
+        });
+        await refreshShifts(); // Rollback
+      }
+    })();
+
+    return placeholder;
+  }, [refreshShifts]);
+
+  const closeCashierShift = useCallback((payload: { closingCash: number; note?: string | null }): CashierShift => {
+    const current = activeCashierShiftRef.current;
+    if (!current) throw new Error('Shift aktif tidak ditemukan');
+
+    const closed: CashierShift = {
+      ...current, status: 'closed', closedAt: new Date(),
+      closingCash: payload.closingCash, note: payload.note ?? current.note,
     };
 
-    setTables((prev) =>
-      prev.map((table) =>
-        table.id === tableId
-          ? {
-              ...table,
-              status: 'available',
-              startTime: null,
-              sessionType: null,
-              orders: [],
-              billingMode: null,
-              selectedPackageId: null,
-              selectedPackageName: null,
-              selectedPackageHours: 0,
-              selectedPackagePrice: 0,
-              packageReminderShownAt: null,
-              originCashierShiftId: null,
-              originStaffId: null,
-              originStaffName: null,
-              involvedStaffIds: [],
-              involvedStaffNames: [],
-            }
-          : table
-      )
-    );
-    setElapsedMinutes((prev) => {
-      const next = { ...prev };
-      delete next[tableId];
-      return next;
-    });
-    setActiveModalTableIdState(null);
-    setOrderHistory((prev) => [historyEntry, ...prev]);
-    recordShiftTransaction(context.shift.id, historyEntry.grandTotal, paymentType, {
-      staffIds: historyEntry.involvedStaffIds,
-      staffNames: historyEntry.involvedStaffNames,
-    });
-    return historyEntry;
-  }, [getCurrentShiftContext, recordShiftTransaction, resolvePaymentMethodType, withActorOnTable]);
+    setCashierShifts((prev) => prev.map((s) => s.id === closed.id ? closed : s));
+
+    void (async () => {
+      try {
+        await api.closeShiftApi({ closing_cash: payload.closingCash, note: payload.note });
+        await refreshShifts();
+      } catch (e) {
+        console.error('closeCashierShift failed:', e);
+        toast({
+          title: 'Gagal Tutup Shift',
+          description: e instanceof Error ? e.message : 'Pastikan saldo akhir sudah benar.',
+          variant: 'destructive',
+        });
+        await refreshShifts(); // Rollback
+      }
+    })();
+
+    return closed;
+  }, [refreshShifts]);
+
+  // ── Open Bill Operations ───────────────────────────────────────────────────
 
   const createOpenBill = useCallback((initial?: { tableId?: number | null; customerName?: string; waitingListEntryId?: string | null }): OpenBill | null => {
-    const context = getCurrentShiftContext();
-    if (!context) return null;
-    const table = initial?.tableId ? tablesRef.current.find((item) => item.id === initial.tableId) ?? null : null;
-    const existingBill = table?.activeOpenBillId
-      ? openBillsRef.current.find((bill) => bill.id === table.activeOpenBillId) ?? null
-      : null;
-    if (existingBill) {
-      setActiveOpenBillId(existingBill.id);
-      return existingBill;
-    }
+    if (!currentStaffRef.current || !activeCashierShiftRef.current) return null;
 
-    const now = new Date();
-    const actorMeta = mergeInvolvedStaff([], [], context.staff);
-    const nextBill: OpenBill = {
-      id: `bill-${Date.now()}`,
-      code: createOpenBillCode(openBillsRef.current.length + 1),
-      customerName: initial?.customerName?.trim() ?? '',
-      memberId: null,
-      pointsToRedeem: 0,
-      status: 'open',
-      createdAt: now,
-      updatedAt: now,
-      waitingListEntryId: initial?.waitingListEntryId ?? null,
-      groups: table ? [{
-        id: `group-${Date.now()}`,
-        fulfillmentType: 'dine-in',
-        tableId: table.id,
-        tableName: table.name,
-        items: [],
-        subtotal: 0,
-      }] : [],
-      originCashierShiftId: context.shift.id,
-      originStaffId: context.staff.id,
-      originStaffName: context.staff.name,
-      involvedStaffIds: actorMeta.involvedStaffIds,
-      involvedStaffNames: actorMeta.involvedStaffNames,
-    };
-
-    setOpenBills((prev) => [nextBill, ...prev]);
-    if (table) {
-      setTables((prev) =>
-        prev.map((item) => item.id === table.id ? { ...item, activeOpenBillId: nextBill.id } : item)
-      );
-    }
-    setActiveOpenBillId(nextBill.id);
-    return nextBill;
-  }, [getCurrentShiftContext, setActiveOpenBillId]);
-
-  const createOpenBillForTable = useCallback((tableId: number) => {
-    if (!getCurrentShiftContext()) return null;
-    const table = tablesRef.current.find((item) => item.id === tableId);
-    if (!table || table.status === 'occupied') return null;
-    if (table.activeOpenBillId) {
-      const existing = openBillsRef.current.find((bill) => bill.id === table.activeOpenBillId) ?? null;
-      if (existing) {
-        setActiveOpenBillId(existing.id);
-        return existing;
+    // Check if table already has a bill
+    if (initial?.tableId) {
+      const table = tablesRef.current.find((t) => t.id === initial.tableId);
+      if (table?.activeOpenBillId) {
+        const existing = openBillsRef.current.find((b) => b.id === table.activeOpenBillId);
+        if (existing) { setActiveOpenBillIdState(existing.id); return existing; }
       }
     }
+
+    const placeholder: OpenBill = {
+      id: `pending-${Date.now()}`, code: 'OB-...', customerName: initial?.customerName?.trim() ?? '',
+      memberId: null, pointsToRedeem: 0, status: 'open',
+      createdAt: new Date(), updatedAt: new Date(),
+      waitingListEntryId: initial?.waitingListEntryId ?? null, groups: [],
+      originCashierShiftId: activeCashierShiftRef.current.id,
+      originStaffId: currentStaffRef.current.id, originStaffName: currentStaffRef.current.name,
+      involvedStaffIds: [currentStaffRef.current.id], involvedStaffNames: [currentStaffRef.current.name],
+    };
+
+    setOpenBills((prev) => [placeholder, ...prev]);
+    setActiveOpenBillIdState(placeholder.id);
+
+    const createResolution = (async () => {
+      const response = await api.createOpenBillApi({
+        table_id: initial?.tableId,
+        customer_name: initial?.customerName?.trim(),
+        waiting_list_entry_id: initial?.waitingListEntryId,
+      });
+      const createdBill = mapOpenBill(response.data as R);
+      linkOpenBillIdentity(placeholder.id, createdBill.id);
+      upsertOpenBillState(createdBill, placeholder.id);
+      return createdBill.id;
+    })();
+
+    openBillCreateResolutionRef.current.set(placeholder.id, createResolution);
+
+    void enqueueOpenBillTask(placeholder.id, async () => {
+      try {
+        await createResolution;
+        await Promise.all([refreshOpenBills(), refreshTables()]);
+      } catch (e) {
+        console.error('createOpenBill failed:', e);
+        setOpenBills((prev) => prev.filter((bill) => bill.id !== placeholder.id));
+        setActiveOpenBillIdState((current) => current === placeholder.id ? null : current);
+        cleanupOpenBillSync(placeholder.id);
+        await refreshOpenBills();
+      }
+    }).catch(() => undefined);
+
+    return placeholder;
+  }, [cleanupOpenBillSync, enqueueOpenBillTask, linkOpenBillIdentity, refreshOpenBills, refreshTables, upsertOpenBillState]);
+
+  const createOpenBillForTable = useCallback((tableId: number): OpenBill | null => {
+    const table = tablesRef.current.find((t) => t.id === tableId);
+    if (!table || table.status === 'occupied') return null;
+    if (table.activeOpenBillId) {
+      const existing = openBillsRef.current.find((b) => b.id === table.activeOpenBillId);
+      if (existing) { setActiveOpenBillIdState(existing.id); return existing; }
+    }
     return createOpenBill({ tableId });
-  }, [createOpenBill, getCurrentShiftContext, setActiveOpenBillId]);
+  }, [createOpenBill]);
 
   const updateOpenBill = useCallback((billId: string, updates: Partial<OpenBill>) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    setOpenBills((prev) =>
-      prev.map((bill) =>
-        bill.id === billId
-          ? { ...withActorOnOpenBill({ ...bill, ...updates }, context), updatedAt: new Date() }
-          : bill
-      )
-    );
-  }, [getCurrentShiftContext, withActorOnOpenBill]);
+    if (updates.customerName === undefined && updates.pointsToRedeem === undefined) return;
+
+    void enqueueOpenBillTask(billId, async () => {
+      try {
+        const canonicalBillId = await resolveOpenBillId(billId);
+        await api.updateOpenBillApi(canonicalBillId, {
+          customer_name: updates.customerName,
+          points_to_redeem: updates.pointsToRedeem,
+        });
+        await refreshOpenBills();
+      } catch (e) {
+        console.error('updateOpenBill failed:', e);
+        throw e;
+      }
+    }).catch(() => undefined);
+  }, [enqueueOpenBillTask, refreshOpenBills, resolveOpenBillId]);
 
   const deleteOpenBill = useCallback((billId: string) => {
-    if (!getCurrentShiftContext()) return;
-    setOpenBills((prev) => prev.filter((bill) => bill.id !== billId));
-    setTables((prev) =>
-      prev.map((table) => table.activeOpenBillId === billId ? { ...table, activeOpenBillId: null } : table)
-    );
+    setOpenBills((prev) => prev.filter((b) => b.id !== billId));
     setActiveOpenBillIdState((prev) => prev === billId ? null : prev);
-  }, [getCurrentShiftContext]);
+
+    void enqueueOpenBillTask(billId, async () => {
+      try {
+        const canonicalBillId = await resolveOpenBillId(billId);
+        await api.deleteOpenBillApi(canonicalBillId);
+        await Promise.all([refreshOpenBills(), refreshTables()]);
+        cleanupOpenBillSync(billId);
+      } catch (e) {
+        console.error('deleteOpenBill failed:', e);
+        await refreshOpenBills();
+      }
+    }).catch(() => undefined);
+  }, [cleanupOpenBillSync, enqueueOpenBillTask, refreshOpenBills, refreshTables, resolveOpenBillId]);
 
   const assignTableToOpenBill = useCallback((billId: string, tableId: number) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    const targetTable = tablesRef.current.find((table) => table.id === tableId);
-    if (!targetTable || targetTable.status === 'occupied') return;
+    const previousOpenBills = openBillsRef.current;
+    const previousTables = tablesRef.current;
+    const targetTable = previousTables.find((table) => table.id === tableId);
 
-    const currentBill = openBillsRef.current.find((bill) => bill.id === billId);
-    if (!currentBill) return;
-    const otherBillId = targetTable.activeOpenBillId;
-    if (otherBillId && otherBillId !== billId) return;
+    if (!targetTable) return;
 
-    const existingTableIds = currentBill.groups
-      .filter((group) => group.fulfillmentType === 'dine-in' && group.tableId && group.tableId !== tableId)
-      .map((group) => group.tableId as number);
+    const billToAssign = previousOpenBills.find((bill) => bill.id === billId);
+    const previousLinkedTableId = billToAssign?.groups.find((group) => group.fulfillmentType === 'dine-in')?.tableId ?? null;
 
-    setOpenBills((prev) =>
-      prev.map((bill) => {
-        if (bill.id !== billId) return bill;
-        const billWithActor = withActorOnOpenBill(bill, context);
-        const hasDineInGroup = billWithActor.groups.some((group) => group.fulfillmentType === 'dine-in');
-        const nextGroups = hasDineInGroup
-          ? billWithActor.groups.map((group) =>
-              group.fulfillmentType === 'dine-in'
-                ? { ...group, tableId, tableName: targetTable.name, subtotal: sumOrderItems(group.items) }
-                : group
-            )
-          : [
-              ...billWithActor.groups,
-              {
-                id: `group-${Date.now()}`,
-                fulfillmentType: 'dine-in' as FulfillmentType,
-                tableId,
-                tableName: targetTable.name,
-                items: [],
-                subtotal: 0,
-              },
-            ];
-        return { ...billWithActor, groups: nextGroups, updatedAt: new Date() };
-      })
-    );
+    const nextOpenBills = previousOpenBills.map((bill) => {
+      if (bill.id !== billId) return bill;
 
-    setTables((prev) =>
-      prev.map((table) => {
-        if (existingTableIds.includes(table.id)) return { ...table, activeOpenBillId: null };
-        if (table.id === tableId) return { ...table, activeOpenBillId: billId };
-        return table;
-      })
-    );
-  }, [getCurrentShiftContext, withActorOnOpenBill]);
+      const dineInGroup = bill.groups.find((group) => group.fulfillmentType === 'dine-in');
+      if (dineInGroup) {
+        return {
+          ...bill,
+          groups: bill.groups.map((group) =>
+            group.fulfillmentType === 'dine-in'
+              ? { ...group, tableId, tableName: targetTable.name }
+              : group
+          ),
+        };
+      }
+
+      return {
+        ...bill,
+        groups: [
+          ...bill.groups,
+          {
+            id: `optimistic-dine-in-${bill.id}`,
+            fulfillmentType: 'dine-in' as FulfillmentType,
+            tableId,
+            tableName: targetTable.name,
+            items: [],
+            subtotal: 0,
+          },
+        ],
+      };
+    });
+
+    const nextTables = previousTables.map((table) => {
+      if (table.id === tableId) {
+        return { ...table, activeOpenBillId: billId };
+      }
+
+      if (table.activeOpenBillId === billId || (previousLinkedTableId !== null && table.id === previousLinkedTableId)) {
+        return { ...table, activeOpenBillId: null };
+      }
+
+      return table;
+    });
+
+    setOpenBills(nextOpenBills);
+    setTables(nextTables);
+
+    void enqueueOpenBillTask(billId, async () => {
+      try {
+        const canonicalBillId = await resolveOpenBillId(billId);
+        await api.assignTableToOpenBillApi(canonicalBillId, tableId);
+        await Promise.all([refreshOpenBills(), refreshTables()]);
+      } catch (e) {
+        console.error('assignTableToOpenBill failed:', e);
+        setOpenBills(previousOpenBills);
+        setTables(previousTables);
+        toast({
+          title: 'Gagal Assign Meja',
+          description: e instanceof Error ? e.message : 'Terjadi kesalahan sistem saat menghubungkan open bill ke meja.',
+          variant: 'destructive',
+        });
+        await Promise.all([refreshOpenBills(), refreshTables()]);
+      }
+    }).catch(() => undefined);
+  }, [enqueueOpenBillTask, refreshOpenBills, refreshTables, resolveOpenBillId, toast]);
 
   const addItemToOpenBill = useCallback((billId: string, fulfillmentType: FulfillmentType, menuItem: MenuItem) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    setOpenBills((prev) =>
-      prev.map((bill) => {
-        if (bill.id !== billId) return bill;
-        const billWithActor = withActorOnOpenBill(bill, context);
-        const existingGroup = billWithActor.groups.find((group) => group.fulfillmentType === fulfillmentType);
-        const nextGroups = existingGroup
-          ? billWithActor.groups.map((group) => {
-              if (group.fulfillmentType !== fulfillmentType) return group;
-              const existingItem = group.items.find((item) => item.menuItem.id === menuItem.id);
-              const nextItems = existingItem
-                ? group.items.map((item) =>
-                    item.menuItem.id === menuItem.id ? { ...item, quantity: item.quantity + 1 } : item
-                  )
-                : [...group.items, { menuItem, quantity: 1, addedAt: new Date() }];
-              return { ...group, items: nextItems, subtotal: sumOrderItems(nextItems) };
-            })
-          : [
-              ...bill.groups,
-              {
-                id: `group-${Date.now()}`,
-                fulfillmentType,
-                tableId: null,
-                tableName: null,
-                items: [{ menuItem, quantity: 1, addedAt: new Date() }],
-                subtotal: menuItem.price,
-              },
-            ];
-        return { ...billWithActor, groups: nextGroups, updatedAt: new Date() };
-      })
-    );
-    deductStockForMenuItem(menuItem);
-  }, [deductStockForMenuItem, getCurrentShiftContext, withActorOnOpenBill]);
+    void enqueueOpenBillTask(billId, async () => {
+      try {
+        const canonicalBillId = await resolveOpenBillId(billId);
+        await api.addItemToOpenBillApi(canonicalBillId, { fulfillment_type: fulfillmentType, menu_item_id: menuItem.id });
+        await refreshOpenBills();
+      } catch (e) {
+        console.error('addItemToOpenBill failed:', e);
+        throw e;
+      }
+    }).catch(() => undefined);
+  }, [enqueueOpenBillTask, refreshOpenBills, resolveOpenBillId]);
 
   const removeItemFromOpenBill = useCallback((billId: string, fulfillmentType: FulfillmentType, menuItemId: string) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    setOpenBills((prev) =>
-      prev.map((bill) => {
-        if (bill.id !== billId) return bill;
-        const billWithActor = withActorOnOpenBill(bill, context);
-        return {
-          ...billWithActor,
-          groups: billWithActor.groups.map((group) =>
-            group.fulfillmentType === fulfillmentType
-              ? {
-                  ...group,
-                  items: group.items.filter((item) => item.menuItem.id !== menuItemId),
-                  subtotal: sumOrderItems(group.items.filter((item) => item.menuItem.id !== menuItemId)),
-                }
-              : group
-          ),
-          updatedAt: new Date(),
-        };
-      })
-    );
-  }, [getCurrentShiftContext, withActorOnOpenBill]);
+    void enqueueOpenBillTask(billId, async () => {
+      try {
+        const canonicalBillId = await resolveOpenBillId(billId);
+        await api.removeItemFromOpenBillApi(canonicalBillId, { fulfillment_type: fulfillmentType, menu_item_id: menuItemId });
+        await refreshOpenBills();
+      } catch (e) {
+        console.error('removeItemFromOpenBill failed:', e);
+        throw e;
+      }
+    }).catch(() => undefined);
+  }, [enqueueOpenBillTask, refreshOpenBills, resolveOpenBillId]);
 
   const updateOpenBillItemQuantity = useCallback((billId: string, fulfillmentType: FulfillmentType, menuItemId: string, quantity: number) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    if (quantity <= 0) {
-      removeItemFromOpenBill(billId, fulfillmentType, menuItemId);
-      return;
-    }
-    setOpenBills((prev) =>
-      prev.map((bill) => {
-        if (bill.id !== billId) return bill;
-        const billWithActor = withActorOnOpenBill(bill, context);
-        return {
-          ...billWithActor,
-          groups: billWithActor.groups.map((group) =>
-            group.fulfillmentType === fulfillmentType
-              ? {
-                  ...group,
-                  items: group.items.map((item) =>
-                    item.menuItem.id === menuItemId ? { ...item, quantity } : item
-                  ),
-                  subtotal: sumOrderItems(group.items.map((item) =>
-                    item.menuItem.id === menuItemId ? { ...item, quantity } : item
-                  )),
-                }
-              : group
-          ),
-          updatedAt: new Date(),
-        };
-      })
-    );
-  }, [getCurrentShiftContext, removeItemFromOpenBill, withActorOnOpenBill]);
+    void enqueueOpenBillTask(billId, async () => {
+      try {
+        const canonicalBillId = await resolveOpenBillId(billId);
+        await api.updateItemOnOpenBillApi(canonicalBillId, { fulfillment_type: fulfillmentType, menu_item_id: menuItemId, quantity });
+        await refreshOpenBills();
+      } catch (e) {
+        console.error('updateOpenBillItemQuantity failed:', e);
+        throw e;
+      }
+    }).catch(() => undefined);
+  }, [enqueueOpenBillTask, refreshOpenBills, resolveOpenBillId]);
 
-  const addWaitingListEntry = useCallback((entry: Omit<WaitingListEntry, 'id' | 'status' | 'createdAt' | 'seatedAt' | 'tableId'>) => {
-    setWaitingList((prev) => [
-      {
-        id: `wait-${Date.now()}`,
-        customerName: entry.customerName,
-        phone: entry.phone,
-        partySize: entry.partySize,
-        notes: entry.notes,
-        preferredTableType: entry.preferredTableType,
-        status: 'waiting',
-        createdAt: new Date(),
-        seatedAt: null,
-        tableId: null,
-      },
-      ...prev,
-    ]);
-  }, []);
-
-  const updateWaitingListEntry = useCallback((entryId: string, updates: Partial<WaitingListEntry>) => {
-    setWaitingList((prev) => prev.map((entry) => entry.id === entryId ? { ...entry, ...updates } : entry));
-  }, []);
-
-  const cancelWaitingListEntry = useCallback((entryId: string) => {
-    const currentEntry = waitingList.find((entry) => entry.id === entryId) ?? null;
-    if (currentEntry?.tableId) {
-      setTables((prev) =>
-        prev.map((table) =>
-          table.id === currentEntry.tableId && table.status === 'reserved'
-            ? { ...table, status: 'available' }
-            : table
-        )
-      );
-    }
-    setWaitingList((prev) => prev.map((entry) => entry.id === entryId ? { ...entry, status: 'cancelled' } : entry));
-  }, [waitingList]);
-
-  const seatWaitingListEntry = useCallback((entryId: string, tableId: number) => {
-    const entry = waitingList.find((item) => item.id === entryId);
-    const table = tablesRef.current.find((item) => item.id === tableId);
-    if (!entry || !table || table.status !== 'available') return null;
-    setWaitingList((prev) =>
-      prev.map((item) =>
-        item.id === entryId
-          ? { ...item, status: 'seated', seatedAt: new Date(), tableId }
-          : item
-      )
-    );
-    setTables((prev) =>
-      prev.map((item) =>
-        item.id === tableId
-          ? { ...item, status: 'reserved' }
-          : item
-      )
-    );
-    return tableId;
-  }, [waitingList]);
-
-  const addMember = useCallback((member: Omit<Member, 'id' | 'tier' | 'pointsBalance' | 'createdAt' | 'updatedAt'>) => {
-    const now = new Date();
-    const nextMember: Member = {
-      id: `member-${Date.now()}`,
-      code: member.code.trim() || `MBR-${String(membersRef.current.length + 1).padStart(3, '0')}`,
-      name: member.name.trim(),
-      phone: member.phone.trim(),
-      tier: 'Bronze',
-      pointsBalance: 0,
-      createdAt: now,
-      updatedAt: now,
-    };
-    setMembers((prev) => [nextMember, ...prev]);
-    return nextMember;
-  }, []);
-
-  const updateMember = useCallback((id: string, updates: Partial<Member>) => {
-    setMembers((prev) =>
-      prev.map((member) => {
-        if (member.id !== id) return member;
-        const pointsBalance = updates.pointsBalance ?? member.pointsBalance;
-        return {
-          ...member,
-          ...updates,
-          pointsBalance,
-          tier: getMemberTier(pointsBalance),
-          updatedAt: new Date(),
-        };
-      })
-    );
-  }, []);
-
-  const deleteMember = useCallback((id: string) => {
-    setMembers((prev) => prev.filter((member) => member.id !== id));
-    setOpenBills((prev) => prev.map((bill) => bill.memberId === id ? { ...bill, memberId: null, pointsToRedeem: 0 } : bill));
-  }, []);
+  const updateOpenBillItemNote = useCallback((billId: string, fulfillmentType: FulfillmentType, menuItemId: string, note: string) => {
+    setOpenBills((prev) => prev.map((bill) => {
+      if (bill.id !== billId) return bill;
+      return {
+        ...bill,
+        groups: bill.groups.map((group) => {
+          if (group.fulfillmentType !== fulfillmentType) return group;
+          return {
+            ...group,
+            items: group.items.map((item) =>
+              item.menuItem.id === menuItemId ? { ...item, note: note || undefined } : item
+            ),
+          };
+        }),
+      };
+    }));
+    void enqueueOpenBillTask(billId, async () => {
+      try {
+        const canonicalBillId = await resolveOpenBillId(billId);
+        const bill = openBills.find((b) => b.id === billId);
+        const group = bill?.groups.find((g) => g.fulfillmentType === fulfillmentType);
+        const item = group?.items.find((i) => i.menuItem.id === menuItemId);
+        if (!item) return;
+        await api.updateItemOnOpenBillApi(canonicalBillId, {
+          fulfillment_type: fulfillmentType,
+          menu_item_id: menuItemId,
+          quantity: item.quantity,
+          note: note || undefined,
+        });
+      } catch (e) {
+        console.error('updateOpenBillItemNote failed:', e);
+      }
+    }).catch(() => undefined);
+  }, [enqueueOpenBillTask, openBills, resolveOpenBillId]);
 
   const attachMemberToOpenBill = useCallback((billId: string, memberId: string | null) => {
-    const context = getCurrentShiftContext();
-    if (!context) return;
-    setOpenBills((prev) =>
-      prev.map((bill) =>
-        bill.id === billId
-          ? {
-              ...withActorOnOpenBill(bill, context),
-              memberId,
-              pointsToRedeem: memberId ? bill.pointsToRedeem : 0,
-              updatedAt: new Date(),
-            }
-          : bill
-      )
-    );
-  }, [getCurrentShiftContext, withActorOnOpenBill]);
+    void enqueueOpenBillTask(billId, async () => {
+      try {
+        const canonicalBillId = await resolveOpenBillId(billId);
+        await api.attachMemberToOpenBillApi(canonicalBillId, memberId);
+        await refreshOpenBills();
+      } catch (e) {
+        console.error('attachMemberToOpenBill failed:', e);
+        throw e;
+      }
+    }).catch(() => undefined);
+  }, [enqueueOpenBillTask, refreshOpenBills, resolveOpenBillId]);
 
-  const checkoutOpenBill = useCallback((billId: string, staff: { id: string; name: string }, paymentMethodId?: string | null, paymentMethodName?: string | null, paymentReference?: string | null): OrderHistory => {
-    const context = getCurrentShiftContext();
-    if (!context || context.staff.id !== staff.id) {
-      throw new Error('Transaksi dikunci sampai shift kasir aktif');
+  const saveOpenBillDraft = useCallback(async (billId: string): Promise<OpenBill> => {
+    const canonicalBillId = await resolveOpenBillId(billId);
+    await waitForOpenBillSync(canonicalBillId);
+
+    const response = await api.showOpenBill(canonicalBillId);
+    const draftBill = mapOpenBill(response.data as R);
+    linkOpenBillIdentity(billId, draftBill.id);
+    upsertOpenBillState(draftBill, billId === draftBill.id ? undefined : billId);
+    await refreshTables();
+
+    return draftBill;
+  }, [linkOpenBillIdentity, refreshTables, resolveOpenBillId, upsertOpenBillState, waitForOpenBillSync]);
+
+  const fetchOpenBillReceipt = useCallback(async (billId: string): Promise<DraftReceiptDocument> => {
+    const canonicalBillId = await resolveOpenBillId(billId);
+    const response = await api.fetchOpenBillReceiptApi(canonicalBillId);
+    return mapDraftReceiptDocument(response.data as R);
+  }, [resolveOpenBillId]);
+
+  const getOpenBillTotals = useCallback((bill: OpenBill) => {
+    // Client-side calculation for immediate UI responsiveness (mirrors backend logic)
+    const subtotal = bill.groups.reduce((sum, group) => sum + sumOrderItems(group.items), 0);
+    const redeemableSubtotal = subtotal;
+    const member = membersRef.current.find((m) => m.id === bill.memberId) ?? null;
+    const maxRedeemPoints = Math.floor((redeemableSubtotal * MAX_REDEEM_PERCENT) / POINT_VALUE_RUPIAH);
+    const allowedPoints = Math.min(member?.pointsBalance ?? 0, bill.pointsToRedeem, maxRedeemPoints);
+    const redeemAmount = allowedPoints * POINT_VALUE_RUPIAH;
+    const taxableBase = subtotal - redeemAmount;
+    const tax = settingsRef.current.taxPercent > 0 ? Math.round(taxableBase * (settingsRef.current.taxPercent / 100)) : 0;
+    return { subtotal, redeemableSubtotal, pointsRedeemed: allowedPoints, redeemAmount, tax, total: taxableBase + tax };
+  }, []);
+
+  const checkoutOpenBill = useCallback(async (
+    billId: string,
+    _staff: { id: string; name: string },
+    paymentMethodId?: string | null,
+    paymentMethodName?: string | null,
+    paymentReference?: string | null
+  ): Promise<OrderHistory> => {
+    try {
+      const res = await api.checkoutOpenBillApi(billId, {
+        payment_method_id: paymentMethodId,
+        payment_method_name: paymentMethodName,
+        payment_reference: paymentReference,
+      });
+      const order = mapOrderHistory(res.data as R);
+      await Promise.all([refreshOpenBills(), refreshTables(), refreshOrders(), refreshShifts(), refreshMembers()]);
+      return order;
+    } catch (e) {
+      console.error('checkoutOpenBill failed:', e);
+      await refreshOpenBills();
+      throw (e instanceof Error ? e : new Error('Terjadi kesalahan sistem saat memproses pembayaran.'));
     }
-    const bill = openBillsRef.current.find((item) => item.id === billId);
-    if (!bill) throw new Error(`Open bill ${billId} not found`);
-    const billForCheckout = withActorOnOpenBill(bill, context);
+  }, [refreshOpenBills, refreshTables, refreshOrders, refreshShifts, refreshMembers]);
 
-    const now = new Date();
-    const groups = billForCheckout.groups.map((group) => ({ ...group, subtotal: sumOrderItems(group.items) }));
-    const historyGroups = historyGroupsFromBill(groups);
-    const member = membersRef.current.find((item) => item.id === billForCheckout.memberId) ?? null;
-    const totals = getOpenBillTotals({ ...billForCheckout, groups });
-    const pointsEarned = Math.floor(totals.redeemableSubtotal / POINTS_PER_RUPIAH);
-    const billType = billTypeFromGroups(groups);
-    const dineInGroup = historyGroups.find((group) => group.fulfillmentType === 'dine-in') ?? null;
-    const paymentType = resolvePaymentMethodType(paymentMethodId, paymentMethodName);
-    const involvedStaffIds = dedupeList(billForCheckout.involvedStaffIds);
-    const involvedStaffNames = dedupeList(billForCheckout.involvedStaffNames.length ? billForCheckout.involvedStaffNames : [staff.name]);
+  // ── Waiting List Operations ────────────────────────────────────────────────
 
-    const historyEntry: OrderHistory = {
-      id: `order-${Date.now()}`,
-      tableId: dineInGroup?.tableId ?? 0,
-      tableName: billType === 'dine-in'
-        ? (dineInGroup?.tableName ?? `Open Bill ${billForCheckout.code}`)
-        : billType === 'takeaway'
-          ? `Takeaway (${billForCheckout.code})`
-          : `Open Bill ${billForCheckout.code}`,
-      tableType: tablesRef.current.find((table) => table.id === dineInGroup?.tableId)?.type ?? 'standard',
-      sessionType: 'cafe',
-      billType,
-      billiardBillingMode: null,
-      diningType: billType === 'mixed' ? undefined : (billType === 'dine-in' ? 'dine-in' : 'takeaway'),
-      startTime: billForCheckout.createdAt,
-      endTime: now,
-      durationMinutes: Math.floor((now.getTime() - billForCheckout.createdAt.getTime()) / 60000),
-      sessionDurationHours: 0,
-      rentalCost: 0,
-      selectedPackageId: null,
-      selectedPackageName: null,
-      selectedPackageHours: 0,
-      selectedPackagePrice: 0,
-      orders: flattenGroups(groups),
-      groups: historyGroups,
-      orderTotal: totals.subtotal,
-      grandTotal: totals.total,
-      orderCost: groups.reduce((sum, group) => sum + orderItemCost(group.items), 0),
-      servedBy: joinServedByChain(involvedStaffNames),
-      status: 'completed',
-      refundedAt: null,
-      refundedBy: null,
-      refundReason: null,
-      paymentMethodId: paymentMethodId ?? null,
-      paymentMethodName: paymentMethodName ?? null,
-      paymentMethodType: paymentType,
-      paymentReference: paymentReference ?? null,
-      cashierShiftId: context.shift.id,
-      refundedInCashierShiftId: null,
-      originCashierShiftId: billForCheckout.originCashierShiftId ?? context.shift.id,
-      originStaffId: billForCheckout.originStaffId ?? context.staff.id,
-      originStaffName: billForCheckout.originStaffName ?? context.staff.name,
-      involvedStaffIds,
-      involvedStaffNames,
-      isContinuedFromPreviousShift: (billForCheckout.originCashierShiftId ?? context.shift.id) !== context.shift.id,
-      memberId: member?.id ?? null,
-      memberCode: member?.code ?? null,
-      memberName: member?.name ?? null,
-      pointsEarned,
-      pointsRedeemed: totals.pointsRedeemed,
-      redeemAmount: totals.redeemAmount,
-      createdAt: now,
+  const addWaitingListEntry = useCallback(async (entry: Omit<WaitingListEntry, 'id' | 'status' | 'createdAt' | 'seatedAt' | 'tableId'>) => {
+    try {
+      await api.addWaitingListEntryApi({
+        customer_name: entry.customerName, phone: entry.phone,
+        party_size: entry.partySize, notes: entry.notes,
+        preferred_table_type: entry.preferredTableType,
+      });
+      await refreshWaitingList();
+    } catch (e) {
+      console.error('addWaitingListEntry failed:', e);
+      throw e instanceof Error ? e : new Error('Gagal menambahkan waiting list.');
+    }
+  }, [refreshWaitingList]);
+
+  const updateWaitingListEntry = useCallback(async (entryId: string, updates: Partial<WaitingListEntry>) => {
+    try {
+      await api.updateWaitingListEntryApi(entryId, {
+        customer_name: updates.customerName, phone: updates.phone,
+        party_size: updates.partySize, notes: updates.notes,
+        preferred_table_type: updates.preferredTableType,
+      });
+      await refreshWaitingList();
+    } catch (e) {
+      console.error('updateWaitingListEntry failed:', e);
+      throw e instanceof Error ? e : new Error('Gagal memperbarui waiting list.');
+    }
+  }, [refreshWaitingList]);
+
+  const cancelWaitingListEntry = useCallback(async (entryId: string) => {
+    try {
+      await api.cancelWaitingListEntryApi(entryId);
+      await Promise.all([refreshWaitingList(), refreshTables()]);
+    } catch (e) {
+      console.error('cancelWaitingListEntry failed:', e);
+      throw e instanceof Error ? e : new Error('Gagal membatalkan waiting list.');
+    }
+  }, [refreshWaitingList, refreshTables]);
+
+  const seatWaitingListEntry = useCallback(async (entryId: string, tableId: number): Promise<number | null> => {
+    try {
+      await api.seatWaitingListEntryApi(entryId, tableId);
+      await Promise.all([refreshWaitingList(), refreshTables()]);
+      return tableId;
+    } catch (e) {
+      console.error('seatWaitingListEntry failed:', e);
+      throw e instanceof Error ? e : new Error('Gagal menempatkan waiting list ke meja.');
+    }
+  }, [refreshWaitingList, refreshTables]);
+
+  // ── Member Operations ──────────────────────────────────────────────────────
+
+  const addMember = useCallback((member: Omit<Member, 'id' | 'tier' | 'pointsBalance' | 'createdAt' | 'updatedAt'>): Member => {
+    const placeholder: Member = {
+      id: `pending-${Date.now()}`, code: member.code, name: member.name, phone: member.phone,
+      tier: 'Bronze', pointsBalance: 0, createdAt: new Date(), updatedAt: new Date(),
     };
+    setMembers((prev) => [placeholder, ...prev]);
 
-    if (member) {
-      const nextBalance = member.pointsBalance - totals.pointsRedeemed + pointsEarned;
-      setMembers((prev) =>
-        prev.map((item) =>
-          item.id === member.id
-            ? { ...item, pointsBalance: nextBalance, tier: getMemberTier(nextBalance), updatedAt: now }
-            : item
-        )
-      );
-      setMemberPointLedger((prev) => [
-        ...(totals.pointsRedeemed > 0 ? [{
-          id: `ledger-${Date.now()}-redeem`,
-          memberId: member.id,
-          orderId: historyEntry.id,
-          type: 'redeem' as const,
-          points: totals.pointsRedeemed,
-          amount: totals.redeemAmount,
-          note: `Redeem pada ${billForCheckout.code}`,
-          createdAt: now,
-        }] : []),
-        ...(pointsEarned > 0 ? [{
-          id: `ledger-${Date.now()}-earn`,
-          memberId: member.id,
-          orderId: historyEntry.id,
-          type: 'earn' as const,
-          points: pointsEarned,
-          amount: totals.redeemableSubtotal,
-          note: `Poin dari ${billForCheckout.code}`,
-          createdAt: now,
-        }] : []),
-        ...prev,
-      ]);
+    void (async () => {
+      try {
+        await api.addMemberApi({ code: member.code, name: member.name, phone: member.phone });
+        await refreshMembers();
+      } catch (e) { console.error('addMember failed:', e); await refreshMembers(); }
+    })();
+
+    return placeholder;
+  }, [refreshMembers]);
+
+  const updateMember = useCallback((id: string, updates: Partial<Member>) => {
+    void (async () => {
+      try {
+        await api.updateMemberApi(id, { name: updates.name, phone: updates.phone });
+        await refreshMembers();
+      } catch (e) { console.error('updateMember failed:', e); }
+    })();
+  }, [refreshMembers]);
+
+  const deleteMember = useCallback((id: string) => {
+    setMembers((prev) => prev.filter((m) => m.id !== id));
+    void (async () => {
+      try {
+        await api.deleteMemberApi(id);
+        await refreshMembers();
+      } catch (e) { console.error('deleteMember failed:', e); await refreshMembers(); }
+    })();
+  }, [refreshMembers]);
+
+  // ── Order Operations ───────────────────────────────────────────────────────
+
+  const refundOrder = useCallback(async (orderId: string, reason: string, refundedBy: { id: string; name: string }): Promise<OrderHistory> => {
+    const trimmedReason = reason.trim();
+    if (!trimmedReason) {
+      throw new Error('Alasan / remarks refund wajib diisi.');
     }
 
-    const tableIds = historyGroups
-      .filter((group) => group.fulfillmentType === 'dine-in' && group.tableId)
-      .map((group) => group.tableId as number);
+    try {
+      const res = await api.refundOrderApi(orderId, trimmedReason);
+      const refundedOrder = mapOrderHistory(res.data as R);
+      await Promise.all([refreshOrders(), refreshShifts(), refreshMembers(), refreshIngredients()]);
+      return refundedOrder;
+    } catch (e) {
+      console.error('refundOrder failed:', e, refundedBy);
+      throw e;
+    }
+  }, [refreshOrders, refreshShifts, refreshMembers, refreshIngredients]);
 
-    setTables((prev) =>
-      prev.map((table) => tableIds.includes(table.id) ? { ...table, activeOpenBillId: null } : table)
-    );
-    setOpenBills((prev) => prev.filter((item) => item.id !== billId));
-    setOrderHistory((prev) => [historyEntry, ...prev]);
-    setActiveOpenBillIdState((prev) => prev === billId ? null : prev);
-    recordShiftTransaction(context.shift.id, historyEntry.grandTotal, paymentType, {
-      staffIds: historyEntry.involvedStaffIds,
-      staffNames: historyEntry.involvedStaffNames,
-    });
-    return historyEntry;
-  }, [getCurrentShiftContext, getOpenBillTotals, recordShiftTransaction, resolvePaymentMethodType, withActorOnOpenBill]);
+  // ── Shift Expense Operations ───────────────────────────────────────────────
+
+  const addShiftExpense = useCallback(async (amount: number, description: string, category: ExpenseCategory): Promise<void> => {
+    const shift = activeCashierShiftRef.current;
+    if (!shift) throw new Error('Tidak ada shift aktif.');
+
+    const placeholder: CashierShiftExpense = {
+      id: `pending-${Date.now()}`,
+      cashierShiftId: shift.id,
+      staffId: currentStaffRef.current?.id ?? '',
+      staffName: currentStaffRef.current?.name ?? '',
+      amount,
+      description,
+      category,
+      createdAt: new Date(),
+    };
+    setCurrentShiftExpenses((prev) => [placeholder, ...prev]);
+    setCashierShifts((prev) => prev.map((s) =>
+      s.id === shift.id ? { ...s, totalExpenses: s.totalExpenses + amount, expectedCash: s.expectedCash - amount } : s
+    ));
+
+    try {
+      await api.addExpenseApi({ amount, description, category });
+      await Promise.all([
+        refreshShiftExpenses(shift.id),
+        refreshShifts(),
+      ]);
+    } catch (e) {
+      setCurrentShiftExpenses((prev) => prev.filter((exp) => exp.id !== placeholder.id));
+      setCashierShifts((prev) => prev.map((s) =>
+        s.id === shift.id ? { ...s, totalExpenses: s.totalExpenses - amount, expectedCash: s.expectedCash + amount } : s
+      ));
+      console.error('addShiftExpense failed:', e);
+      throw e instanceof Error ? e : new Error('Gagal mencatat pengeluaran.');
+    }
+  }, [refreshShiftExpenses, refreshShifts]);
+
+  const deleteShiftExpense = useCallback(async (expenseId: string, deleteReason: string): Promise<void> => {
+    const shift = activeCashierShiftRef.current;
+    const expense = currentShiftExpenses.find((e) => e.id === expenseId);
+    if (!expense || !shift) throw new Error('Data pengeluaran tidak ditemukan.');
+
+    setCurrentShiftExpenses((prev) => prev.filter((e) => e.id !== expenseId));
+    setCashierShifts((prev) => prev.map((s) =>
+      s.id === shift.id ? { ...s, totalExpenses: s.totalExpenses - expense.amount, expectedCash: s.expectedCash + expense.amount } : s
+    ));
+
+    try {
+      await api.deleteExpenseApi(expenseId, deleteReason);
+      await Promise.all([
+        refreshShiftExpenses(shift.id),
+        refreshShifts(),
+      ]);
+    } catch (e) {
+      setCurrentShiftExpenses((prev) => [expense, ...prev].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()));
+      setCashierShifts((prev) => prev.map((s) =>
+        s.id === shift.id ? { ...s, totalExpenses: s.totalExpenses + expense.amount, expectedCash: s.expectedCash - expense.amount } : s
+      ));
+      console.error('deleteShiftExpense failed:', e);
+      throw e instanceof Error ? e : new Error('Gagal menghapus pengeluaran.');
+    }
+  }, [currentShiftExpenses, refreshShiftExpenses, refreshShifts]);
+
+  // ── Admin CRUD: Settings ───────────────────────────────────────────────────
 
   const updateSettings = useCallback((updates: Partial<BusinessSettings>) => {
     setSettings((prev) => ({
       ...prev,
       ...updates,
-      receiptPrint: {
-        ...prev.receiptPrint,
-        ...(updates.receiptPrint ?? {}),
+      receiptPrint: { ...prev.receiptPrint, ...(updates.receiptPrint ?? {}) },
+      printerSettings: {
+        cashier: { ...prev.printerSettings.cashier, ...(updates.printerSettings?.cashier ?? {}) },
+        kitchen: { ...prev.printerSettings.kitchen, ...(updates.printerSettings?.kitchen ?? {}) },
       },
     }));
-  }, []);
+    void (async () => {
+      try {
+        await api.updateSettingsApi({
+          name: updates.name, address: updates.address, phone: updates.phone,
+          tax_percent: updates.taxPercent, paper_size: updates.paperSize,
+          footer_message: updates.footerMessage,
+          receipt_show_tax_line: updates.receiptPrint?.showTaxLine,
+          receipt_show_cashier: updates.receiptPrint?.showCashier,
+          receipt_show_payment_info: updates.receiptPrint?.showPaymentInfo,
+          receipt_show_member_info: updates.receiptPrint?.showMemberInfo,
+          receipt_show_print_time: updates.receiptPrint?.showPrintTime,
+          printer_settings: updates.printerSettings ? {
+            cashier: updates.printerSettings.cashier,
+            kitchen: updates.printerSettings.kitchen,
+          } : undefined,
+        });
+        await refreshSettings();
+      } catch (e) { console.error('updateSettings failed:', e); await refreshSettings(); }
+    })();
+  }, [refreshSettings]);
+
+  // ── Admin CRUD: Menu Items ─────────────────────────────────────────────────
 
   const addMenuItem = useCallback((item: MenuItem) => {
-    setMenuItems((prev) => [...prev, item]);
-  }, []);
+    void (async () => {
+      try {
+        await api.addMenuItemApi({
+          name: item.name, category_id: item.categoryId, price: item.price, cost: item.cost,
+          emoji: item.emoji, description: item.description, is_available: item.isAvailable,
+          recipe: item.recipe.map((r) => ({ ingredient_id: r.ingredientId, quantity: r.quantity })),
+        });
+        await refreshMenuItems();
+      } catch (e) { console.error('addMenuItem failed:', e); }
+    })();
+  }, [refreshMenuItems]);
 
   const updateMenuItem = useCallback((id: string, updates: Partial<MenuItem>) => {
-    setMenuItems((prev) => prev.map((item) => item.id === id ? { ...item, ...updates } : item));
-  }, []);
+    void (async () => {
+      try {
+        const payload: R = {};
+        if (updates.name !== undefined) payload.name = updates.name;
+        if (updates.categoryId !== undefined) payload.category_id = updates.categoryId;
+        if (updates.price !== undefined) payload.price = updates.price;
+        if (updates.cost !== undefined) payload.cost = updates.cost;
+        if (updates.emoji !== undefined) payload.emoji = updates.emoji;
+        if (updates.description !== undefined) payload.description = updates.description;
+        if (updates.isAvailable !== undefined) payload.is_available = updates.isAvailable;
+        if (updates.recipe) payload.recipe = updates.recipe.map((r) => ({ ingredient_id: r.ingredientId, quantity: r.quantity }));
+        await api.updateMenuItemApi(id, payload);
+        await refreshMenuItems();
+      } catch (e) { console.error('updateMenuItem failed:', e); }
+    })();
+  }, [refreshMenuItems]);
 
   const deleteMenuItem = useCallback((id: string) => {
-    setMenuItems((prev) => prev.filter((item) => item.id !== id));
+    setMenuItems((prev) => prev.filter((i) => i.id !== id));
+    void (async () => {
+      try { await api.deleteMenuItemApi(id); await refreshMenuItems(); }
+      catch (e) { console.error('deleteMenuItem failed:', e); await refreshMenuItems(); }
+    })();
+  }, [refreshMenuItems]);
+
+  // ── Admin CRUD: Tables ─────────────────────────────────────────────────────
+
+  const addTable = useCallback((table: Omit<Table, 'id' | 'status' | 'startTime' | 'sessionType' | 'orders' | 'activeOpenBillId' | 'billingMode' | 'selectedPackageId' | 'selectedPackageName' | 'selectedPackageHours' | 'selectedPackagePrice' | 'packageReminderShownAt' | 'originCashierShiftId' | 'originStaffId' | 'originStaffName' | 'involvedStaffIds' | 'involvedStaffNames'>) => {
+    void (async () => {
+      try {
+        await api.createTable({ name: table.name, type: table.type, hourly_rate: table.hourlyRate });
+        await refreshTables();
+      } catch (e) { console.error('addTable failed:', e); }
+    })();
+  }, [refreshTables]);
+
+  const updateTable = useCallback((id: number, updates: Partial<Table>) => {
+    void (async () => {
+      try {
+        const payload: R = {};
+        if (updates.name !== undefined) payload.name = updates.name;
+        if (updates.type !== undefined) payload.type = updates.type;
+        if (updates.hourlyRate !== undefined) payload.hourly_rate = updates.hourlyRate;
+        await api.updateTableApi(id, payload);
+        await refreshTables();
+      } catch (e) { console.error('updateTable failed:', e); }
+    })();
+  }, [refreshTables]);
+
+  const markPackageReminderShown = useCallback((id: number) => {
+    // UI-only: no API call needed
+    setTables((prev) => prev.map((t) => t.id === id ? { ...t, packageReminderShownAt: new Date() } : t));
   }, []);
+
+  const deleteTable = useCallback((id: number) => {
+    setTables((prev) => prev.filter((t) => t.id !== id));
+    void (async () => {
+      try { await api.deleteTableApi(id); await refreshTables(); }
+      catch (e) { console.error('deleteTable failed:', e); await refreshTables(); }
+    })();
+  }, [refreshTables]);
+
+  // ── Admin CRUD: Categories ─────────────────────────────────────────────────
+
+  const addCategory = useCallback((cat: Omit<MenuCategory, 'id'>) => {
+    void (async () => {
+      try {
+        await api.addCategoryApi({ name: cat.name, emoji: cat.emoji, description: cat.description, is_active: cat.isActive });
+        await refreshCategories();
+      } catch (e) { console.error('addCategory failed:', e); }
+    })();
+  }, [refreshCategories]);
+
+  const updateCategory = useCallback((id: string, updates: Partial<MenuCategory>) => {
+    void (async () => {
+      try {
+        const payload: R = {};
+        if (updates.name !== undefined) payload.name = updates.name;
+        if (updates.emoji !== undefined) payload.emoji = updates.emoji;
+        if (updates.description !== undefined) payload.description = updates.description;
+        if (updates.isActive !== undefined) payload.is_active = updates.isActive;
+        await api.updateCategoryApi(id, payload);
+        await refreshCategories();
+      } catch (e) { console.error('updateCategory failed:', e); }
+    })();
+  }, [refreshCategories]);
+
+  const deleteCategory = useCallback((id: string) => {
+    setCategories((prev) => prev.filter((c) => c.id !== id));
+    void (async () => {
+      try { await api.deleteCategoryApi(id); await refreshCategories(); }
+      catch (e) { console.error('deleteCategory failed:', e); await refreshCategories(); }
+    })();
+  }, [refreshCategories]);
+
+  // ── Admin CRUD: Ingredients ────────────────────────────────────────────────
+
+  const addIngredient = useCallback((ing: Omit<Ingredient, 'id' | 'lastRestocked'>) => {
+    void (async () => {
+      try {
+        await api.addIngredientApi({ name: ing.name, unit: ing.unit, stock: ing.stock, min_stock: ing.minStock, unit_cost: ing.unitCost });
+        await refreshIngredients();
+      } catch (e) { console.error('addIngredient failed:', e); }
+    })();
+  }, [refreshIngredients]);
+
+  const updateIngredient = useCallback((id: string, updates: Partial<Ingredient>) => {
+    void (async () => {
+      try {
+        const payload: R = {};
+        if (updates.name !== undefined) payload.name = updates.name;
+        if (updates.unit !== undefined) payload.unit = updates.unit;
+        if (updates.minStock !== undefined) payload.min_stock = updates.minStock;
+        if (updates.unitCost !== undefined) payload.unit_cost = updates.unitCost;
+        await api.updateIngredientApi(id, payload);
+        await refreshIngredients();
+      } catch (e) { console.error('updateIngredient failed:', e); }
+    })();
+  }, [refreshIngredients]);
+
+  const deleteIngredient = useCallback((id: string) => {
+    setIngredients((prev) => prev.filter((i) => i.id !== id));
+    void (async () => {
+      try { await api.deleteIngredientApi(id); await refreshIngredients(); }
+      catch (e) { console.error('deleteIngredient failed:', e); await refreshIngredients(); }
+    })();
+  }, [refreshIngredients]);
+
+  const adjustStock = useCallback((ingredientId: string, type: 'in' | 'out' | 'adjustment', quantity: number, reason: string, _adjustedBy: string) => {
+    void (async () => {
+      try {
+        await api.adjustStockApi({ ingredient_id: ingredientId, type, quantity, reason });
+        await Promise.all([refreshIngredients(), refreshStockAdjustments()]);
+      } catch (e) { console.error('adjustStock failed:', e); }
+    })();
+  }, [refreshIngredients, refreshStockAdjustments]);
+
+  // ── Admin CRUD: Payment Options ────────────────────────────────────────────
+
+  const addPaymentOption = useCallback((opt: Omit<PaymentOption, 'id'>) => {
+    void (async () => {
+      try {
+        await api.addPaymentOptionApi({
+          name: opt.name, type: opt.type, icon: opt.icon, is_active: opt.isActive,
+          requires_reference: opt.requiresReference, reference_label: opt.referenceLabel,
+          parent_id: opt.parentId, is_group: opt.isGroup,
+        });
+        await refreshPaymentOptions();
+      } catch (e) { console.error('addPaymentOption failed:', e); }
+    })();
+  }, [refreshPaymentOptions]);
+
+  const updatePaymentOption = useCallback((id: string, updates: Partial<PaymentOption>) => {
+    void (async () => {
+      try {
+        const payload: R = {};
+        if (updates.name !== undefined) payload.name = updates.name;
+        if (updates.type !== undefined) payload.type = updates.type;
+        if (updates.icon !== undefined) payload.icon = updates.icon;
+        if (updates.isActive !== undefined) payload.is_active = updates.isActive;
+        if (updates.requiresReference !== undefined) payload.requires_reference = updates.requiresReference;
+        if (updates.referenceLabel !== undefined) payload.reference_label = updates.referenceLabel;
+        await api.updatePaymentOptionApi(id, payload);
+        await refreshPaymentOptions();
+      } catch (e) { console.error('updatePaymentOption failed:', e); }
+    })();
+  }, [refreshPaymentOptions]);
+
+  const deletePaymentOption = useCallback((id: string) => {
+    setPaymentOptions((prev) => prev.filter((p) => p.id !== id && p.parentId !== id));
+    void (async () => {
+      try { await api.deletePaymentOptionApi(id); await refreshPaymentOptions(); }
+      catch (e) { console.error('deletePaymentOption failed:', e); await refreshPaymentOptions(); }
+    })();
+  }, [refreshPaymentOptions]);
+
+  // ── Admin CRUD: Billiard Packages ──────────────────────────────────────────
+
+  const addBilliardPackage = useCallback((pkg: Omit<BilliardPackage, 'id'>) => {
+    void (async () => {
+      try {
+        await api.addBilliardPackageApi({ name: pkg.name, duration_hours: pkg.durationHours, price: pkg.price, is_active: pkg.isActive });
+        await refreshBilliardPackages();
+      } catch (e) { console.error('addBilliardPackage failed:', e); }
+    })();
+  }, [refreshBilliardPackages]);
+
+  const updateBilliardPackage = useCallback((id: string, updates: Partial<BilliardPackage>) => {
+    void (async () => {
+      try {
+        const payload: R = {};
+        if (updates.name !== undefined) payload.name = updates.name;
+        if (updates.durationHours !== undefined) payload.duration_hours = updates.durationHours;
+        if (updates.price !== undefined) payload.price = updates.price;
+        if (updates.isActive !== undefined) payload.is_active = updates.isActive;
+        await api.updateBilliardPackageApi(id, payload);
+        await refreshBilliardPackages();
+      } catch (e) { console.error('updateBilliardPackage failed:', e); }
+    })();
+  }, [refreshBilliardPackages]);
+
+  const deleteBilliardPackage = useCallback((id: string) => {
+    setBilliardPackages((prev) => prev.filter((p) => p.id !== id));
+    void (async () => {
+      try { await api.deleteBilliardPackageApi(id); await refreshBilliardPackages(); }
+      catch (e) { console.error('deleteBilliardPackage failed:', e); await refreshBilliardPackages(); }
+    })();
+  }, [refreshBilliardPackages]);
+
+  // ── Table Layout Operations ────────────────────────────────────────────────
 
   const updateTableLayoutPosition = useCallback((tableId: number, updates: Partial<TableLayoutPosition>) => {
     setTableLayout((prev) => {
       const current = prev[tableId] ?? { xPercent: 8, yPercent: 14, widthPercent: 26 };
-      return {
-        ...prev,
-        [tableId]: {
-          xPercent: updates.xPercent ?? current.xPercent,
-          yPercent: updates.yPercent ?? current.yPercent,
-          widthPercent: updates.widthPercent ?? current.widthPercent,
-        },
-      };
+      return { ...prev, [tableId]: { xPercent: updates.xPercent ?? current.xPercent, yPercent: updates.yPercent ?? current.yPercent, widthPercent: updates.widthPercent ?? current.widthPercent } };
     });
+    void (async () => {
+      try {
+        await api.updateTableLayoutApi(tableId, {
+          x_percent: updates.xPercent, y_percent: updates.yPercent, width_percent: updates.widthPercent,
+        });
+      } catch (e) { console.error('updateTableLayoutPosition failed:', e); }
+    })();
   }, []);
 
   const placeTableOnLayout = useCallback((tableId: number) => {
     setTableLayout((prev) => {
       if (prev[tableId]) return prev;
-      const positionedCount = Object.keys(prev).length;
-      const column = positionedCount % 3;
-      const row = Math.floor(positionedCount / 3);
-      return {
-        ...prev,
-        [tableId]: {
-          xPercent: 8 + column * 29,
-          yPercent: 14 + row * 22,
-          widthPercent: 26,
-        },
-      };
+      const count = Object.keys(prev).length;
+      const col = count % 3;
+      const row = Math.floor(count / 3);
+      return { ...prev, [tableId]: { xPercent: 8 + col * 29, yPercent: 14 + row * 22, widthPercent: 26 } };
     });
   }, []);
 
   const resetTableLayout = useCallback(() => {
-    setTableLayout((prev) => {
-      const next: Record<number, TableLayoutPosition> = {};
-      tablesRef.current.forEach((table) => {
-        if (INITIAL_TABLE_LAYOUT[table.id]) {
-          next[table.id] = INITIAL_TABLE_LAYOUT[table.id];
-        } else if (prev[table.id]) {
-          next[table.id] = prev[table.id];
+    void (async () => {
+      try {
+        const res = await api.resetTableLayoutApi();
+        const layout: Record<number, TableLayoutPosition> = {};
+        for (const [key, value] of Object.entries(res.data)) {
+          layout[Number(key)] = mapTableLayoutPosition(value as R);
         }
-      });
-      return next;
-    });
+        setTableLayout(layout);
+      } catch (e) { console.error('resetTableLayout failed:', e); }
+    })();
   }, []);
 
-  const addTable = useCallback((table: Omit<Table, 'id' | 'status' | 'startTime' | 'sessionType' | 'orders' | 'activeOpenBillId' | 'billingMode' | 'selectedPackageId' | 'selectedPackageName' | 'selectedPackageHours' | 'selectedPackagePrice' | 'packageReminderShownAt' | 'originCashierShiftId' | 'originStaffId' | 'originStaffName' | 'involvedStaffIds' | 'involvedStaffNames'>) => {
-    setTables((prev) => [
-      ...prev,
-      {
-        ...table,
-        id: Math.max(0, ...prev.map((item) => item.id)) + 1,
-        status: 'available',
-        startTime: null,
-        sessionType: null,
-        orders: [],
-        activeOpenBillId: null,
-        billingMode: null,
-        selectedPackageId: null,
-        selectedPackageName: null,
-        selectedPackageHours: 0,
-        selectedPackagePrice: 0,
-        packageReminderShownAt: null,
-        originCashierShiftId: null,
-        originStaffId: null,
-        originStaffName: null,
-        involvedStaffIds: [],
-        involvedStaffNames: [],
-      },
-    ]);
-  }, []);
-
-  const updateTable = useCallback((id: number, updates: Partial<Table>) => {
-    setTables((prev) => prev.map((table) => table.id === id ? { ...table, ...updates } : table));
-  }, []);
-
-  const markPackageReminderShown = useCallback((id: number) => {
-    setTables((prev) =>
-      prev.map((table) =>
-        table.id === id
-          ? { ...table, packageReminderShownAt: new Date() }
-          : table
-      )
-    );
-  }, []);
-
-  const deleteTable = useCallback((id: number) => {
-    setTables((prev) => prev.filter((table) => table.id !== id));
-    setTableLayout((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-  }, []);
-
-  const addCategory = useCallback((category: Omit<MenuCategory, 'id'>) => {
-    setCategories((prev) => [...prev, { ...category, id: `cat-${Date.now()}` }]);
-  }, []);
-
-  const updateCategory = useCallback((id: string, updates: Partial<MenuCategory>) => {
-    setCategories((prev) => prev.map((category) => category.id === id ? { ...category, ...updates } : category));
-  }, []);
-
-  const deleteCategory = useCallback((id: string) => {
-    setCategories((prev) => prev.filter((category) => category.id !== id));
-  }, []);
-
-  const addIngredient = useCallback((ingredient: Omit<Ingredient, 'id' | 'lastRestocked'>) => {
-    setIngredients((prev) => [...prev, { ...ingredient, id: `ing-${Date.now()}`, lastRestocked: new Date() }]);
-  }, []);
-
-  const updateIngredient = useCallback((id: string, updates: Partial<Ingredient>) => {
-    setIngredients((prev) => prev.map((ingredient) => ingredient.id === id ? { ...ingredient, ...updates } : ingredient));
-  }, []);
-
-  const deleteIngredient = useCallback((id: string) => {
-    setIngredients((prev) => prev.filter((ingredient) => ingredient.id !== id));
-  }, []);
-
-  const adjustStock = useCallback((ingredientId: string, type: 'in' | 'out' | 'adjustment', quantity: number, reason: string, adjustedBy: string) => {
-    setIngredients((prev) => {
-      const next = [...prev];
-      const index = next.findIndex((ingredient) => ingredient.id === ingredientId);
-      if (index === -1) return prev;
-      const previousStock = next[index].stock;
-      const newStock = type === 'in' ? previousStock + quantity : previousStock - quantity;
-      next[index] = {
-        ...next[index],
-        stock: Math.max(0, Math.round(newStock * 100) / 100),
-        lastRestocked: type === 'in' ? new Date() : next[index].lastRestocked,
-      };
-      setStockAdjustments((prevAdjustments) => [
-        {
-          id: `adj-${Date.now()}`,
-          ingredientId,
-          type,
-          quantity,
-          reason,
-          adjustedBy,
-          previousStock,
-          newStock: Math.max(0, Math.round(newStock * 100) / 100),
-          createdAt: new Date(),
-        },
-        ...prevAdjustments,
-      ]);
-      return next;
-    });
-  }, []);
-
-  const refundOrder = useCallback((orderId: string, reason: string, refundedBy: { id: string; name: string }): boolean => {
-    const context = getCurrentShiftContext();
-    if (!context || context.staff.id !== refundedBy.id) return false;
-    const target = orderHistoryRef.current.find((order) => order.id === orderId);
-    if (!target || target.status === 'refunded') return false;
-
-    setOrderHistory((prev) =>
-      prev.map((order) =>
-        order.id === orderId
-          ? {
-              ...order,
-              status: 'refunded',
-              refundedAt: new Date(),
-              refundedBy: refundedBy.name,
-              refundReason: reason,
-              refundedInCashierShiftId: context.shift.id,
-            }
-          : order
-      )
-    );
-
-    setIngredients((prev) => {
-      const next = [...prev];
-      target.orders.forEach((item) => {
-        item.menuItem.recipe.forEach((recipeItem) => {
-          const index = next.findIndex((ingredient) => ingredient.id === recipeItem.ingredientId);
-          if (index !== -1) {
-            next[index] = {
-              ...next[index],
-              stock: Math.round((next[index].stock + recipeItem.quantity * item.quantity) * 100) / 100,
-            };
-          }
-        });
-      });
-      return next;
-    });
-
-    if (target.memberId) {
-      const memberId = target.memberId;
-      setMembers((prev) =>
-        prev.map((member) => {
-          if (member.id !== memberId) return member;
-          const nextBalance = member.pointsBalance - target.pointsEarned + target.pointsRedeemed;
-          return {
-            ...member,
-            pointsBalance: nextBalance,
-            tier: getMemberTier(nextBalance),
-            updatedAt: new Date(),
-          };
-        })
-      );
-      setMemberPointLedger((prev) => [
-        {
-          id: `ledger-refund-${Date.now()}`,
-          memberId,
-          orderId: orderId,
-          type: 'adjustment',
-          points: target.pointsRedeemed - target.pointsEarned,
-          amount: target.redeemAmount,
-          note: `Penyesuaian refund ${orderId}`,
-          createdAt: new Date(),
-        },
-        ...prev,
-      ]);
-    }
-    recordShiftRefund(
-      context.shift.id,
-      target.grandTotal,
-      target.paymentMethodType ?? inferPaymentMethodTypeFromMeta(target.paymentMethodId, target.paymentMethodName),
-      {
-        staffIds: dedupeList([...(target.involvedStaffIds ?? []), context.staff.id]),
-        staffNames: dedupeList([...(target.involvedStaffNames ?? []), context.staff.name]),
-      }
-    );
-    return true;
-  }, [getCurrentShiftContext, recordShiftRefund]);
-
-  const activePaymentOptions = paymentOptions.filter((paymentOption) => paymentOption.isActive && paymentOption.parentId === null);
-
-  const addPaymentOption = useCallback((option: Omit<PaymentOption, 'id'>) => {
-    setPaymentOptions((prev) => [...prev, { ...option, id: `pm-${Date.now()}` }]);
-  }, []);
-
-  const updatePaymentOption = useCallback((id: string, updates: Partial<PaymentOption>) => {
-    setPaymentOptions((prev) => prev.map((option) => option.id === id ? { ...option, ...updates } : option));
-  }, []);
-
-  const deletePaymentOption = useCallback((id: string) => {
-    setPaymentOptions((prev) => prev.filter((option) => option.id !== id && option.parentId !== id));
-  }, []);
-
-  const addBilliardPackage = useCallback((pkg: Omit<BilliardPackage, 'id'>) => {
-    setBilliardPackages((prev) => [
-      { ...pkg, id: `pkg-${Date.now()}` },
-      ...prev,
-    ]);
-  }, []);
-
-  const updateBilliardPackage = useCallback((id: string, updates: Partial<BilliardPackage>) => {
-    setBilliardPackages((prev) => prev.map((pkg) => pkg.id === id ? { ...pkg, ...updates } : pkg));
-  }, []);
-
-  const deleteBilliardPackage = useCallback((id: string) => {
-    setBilliardPackages((prev) => prev.filter((pkg) => pkg.id !== id));
-    setTables((prev) =>
-      prev.map((table) =>
-        table.selectedPackageId === id
-          ? {
-              ...table,
-              billingMode: table.status === 'occupied' ? 'open-bill' : null,
-              selectedPackageId: null,
-              selectedPackageName: null,
-              selectedPackageHours: 0,
-              selectedPackagePrice: 0,
-            }
-          : table
-      )
-    );
-  }, []);
+  // ── Context Value ──────────────────────────────────────────────────────────
 
   const value: PosContextType = {
-    tables,
-    menuItems,
-    elapsedMinutes,
-    activeModalTableId,
-    setActiveModalTableId,
-    startSession,
-    addOrderItem,
-    removeOrderItem,
-    updateOrderItemQuantity,
-    endSession,
-    calculateTableBill,
-    formatElapsed,
-    orderHistory,
-    cashierShifts,
-    activeCashierShift,
-    canTransact,
-    openCashierShift,
-    closeCashierShift,
-    settings,
-    updateSettings,
+    tables, menuItems, elapsedMinutes, activeModalTableId, setActiveModalTableId,
+    startSession, addOrderItem, removeOrderItem, updateOrderItemQuantity,
+    endSession, calculateTableBill, formatElapsed,
+    orderHistory, cashierShifts, activeCashierShift, canTransact,
+    openCashierShift, closeCashierShift,
+    settings, updateSettings,
     endSessionWithHistory,
-    setMenuItems,
-    addMenuItem,
-    updateMenuItem,
-    deleteMenuItem,
-    addTable,
-    updateTable,
-    markPackageReminderShown,
-    deleteTable,
-    categories,
-    addCategory,
-    updateCategory,
-    deleteCategory,
-    ingredients,
-    addIngredient,
-    updateIngredient,
-    deleteIngredient,
-    adjustStock,
-    lowStockIngredients,
-    stockAdjustments,
-    openBills,
-    activeOpenBillId,
-    setActiveOpenBillId,
-    createOpenBill,
-    createOpenBillForTable,
-    updateOpenBill,
-    deleteOpenBill,
-    assignTableToOpenBill,
-    addItemToOpenBill,
-    removeItemFromOpenBill,
-    updateOpenBillItemQuantity,
-    getOpenBillTotals,
-    checkoutOpenBill,
-    waitingList,
-    addWaitingListEntry,
-    updateWaitingListEntry,
-    cancelWaitingListEntry,
-    seatWaitingListEntry,
-    billiardPackages,
-    activeBilliardPackages: billiardPackages.filter((pkg) => pkg.isActive),
-    addBilliardPackage,
-    updateBilliardPackage,
-    deleteBilliardPackage,
-    members,
-    memberPointLedger,
-    addMember,
-    updateMember,
-    deleteMember,
-    attachMemberToOpenBill,
-    refundOrder,
-    paymentOptions,
-    activePaymentOptions,
-    addPaymentOption,
-    updatePaymentOption,
-    deletePaymentOption,
-    tableLayout,
-    updateTableLayoutPosition,
-    placeTableOnLayout,
-    resetTableLayout,
+    setMenuItems, addMenuItem, updateMenuItem, deleteMenuItem,
+    addTable, updateTable, markPackageReminderShown, deleteTable,
+    categories, addCategory, updateCategory, deleteCategory,
+    ingredients, addIngredient, updateIngredient, deleteIngredient,
+    adjustStock, lowStockIngredients, stockAdjustments,
+    openBills, activeOpenBillId, setActiveOpenBillId,
+    createOpenBill, createOpenBillForTable, updateOpenBill,
+    saveOpenBillDraft, fetchOpenBillReceipt,
+    deleteOpenBill, assignTableToOpenBill,
+    addItemToOpenBill, removeItemFromOpenBill, updateOpenBillItemQuantity, updateOpenBillItemNote,
+    getOpenBillTotals, checkoutOpenBill,
+    waitingList, addWaitingListEntry, updateWaitingListEntry,
+    cancelWaitingListEntry, seatWaitingListEntry,
+    billiardPackages, activeBilliardPackages,
+    addBilliardPackage, updateBilliardPackage, deleteBilliardPackage,
+    members, memberPointLedger, addMember, updateMember, deleteMember,
+    attachMemberToOpenBill, refundOrder,
+    currentShiftExpenses, addShiftExpense, deleteShiftExpense,
+    paymentOptions, activePaymentOptions,
+    addPaymentOption, updatePaymentOption, deletePaymentOption,
+    tableLayout, updateTableLayoutPosition, placeTableOnLayout, resetTableLayout,
   };
+
+  if (!hydrated) return null;
 
   return <PosContext.Provider value={value}>{children}</PosContext.Provider>;
 }
