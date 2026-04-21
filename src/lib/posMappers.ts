@@ -44,6 +44,25 @@ function safeDateRequired(v: unknown): Date {
   return safeDate(v) ?? new Date();
 }
 
+function normalizeBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'y', 'on', 'active'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'n', 'off', 'inactive'].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+function normalizeNullableString(value: unknown): string | null {
+  if (value == null) return null;
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+  if (['null', 'undefined'].includes(normalized.toLowerCase())) return null;
+  return normalized;
+}
+
 function normalizeMenuCategory(value: unknown): MenuItem['category'] {
   const normalized = String(value ?? '')
     .trim()
@@ -200,23 +219,17 @@ export function mapStockAdjustment(raw: R): StockAdjustment {
 // ── PaymentOption ──────────────────────────────────────────────────────────────
 
 export function mapPaymentOption(raw: R): PaymentOption {
-  const children: R[] = raw.children ?? [];
   const mapped: PaymentOption = {
     id: String(raw.id),
     name: raw.name,
     type: raw.type ?? 'cash',
     icon: raw.icon ?? '💵',
-    isActive: raw.is_active ?? raw.isActive ?? true,
-    requiresReference: raw.requires_reference ?? raw.requiresReference ?? false,
+    isActive: normalizeBoolean(raw.is_active ?? raw.isActive, true),
+    requiresReference: normalizeBoolean(raw.requires_reference ?? raw.requiresReference, false),
     referenceLabel: raw.reference_label ?? raw.referenceLabel ?? '',
-    parentId: raw.parent_id ?? raw.parentId ?? null,
-    isGroup: raw.is_group ?? raw.isGroup ?? false,
+    parentId: normalizeNullableString(raw.parent_id ?? raw.parentId),
+    isGroup: normalizeBoolean(raw.is_group ?? raw.isGroup, false),
   };
-  // Flatten children into the same list (they will be returned separately)
-  const result = [mapped];
-  for (const child of children) {
-    result.push(mapPaymentOption({ ...child, parentId: mapped.id }));
-  }
   return mapped;
 }
 

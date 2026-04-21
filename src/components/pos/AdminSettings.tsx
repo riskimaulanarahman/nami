@@ -81,6 +81,7 @@ export default function AdminSettings() {
   const [packageError, setPackageError] = useState('');
   const [paymentDeleteConfirm, setPaymentDeleteConfirm] = useState<string | null>(null);
   const [packageDeleteConfirm, setPackageDeleteConfirm] = useState<string | null>(null);
+  const [isAddingPayment, setIsAddingPayment] = useState(false);
 
   const [isNativeApp, setIsNativeApp] = useState(false);
   const [printerScanning, setPrinterScanning] = useState(false);
@@ -355,7 +356,7 @@ export default function AdminSettings() {
     printKitchenReceiptFromOrder(testOrder, form, form.printerSettings?.kitchen?.paperSize ?? '58mm');
   };
 
-  const handleAddPaymentOption = () => {
+  const handleAddPaymentOption = async () => {
     if (!newPayName.trim()) {
       const message = 'Nama metode pembayaran wajib diisi.';
       setPaymentError(message);
@@ -375,26 +376,42 @@ export default function AdminSettings() {
       return;
     }
 
-    addPaymentOption({
-      name: newPayName.trim(),
-      icon: newPayIcon.trim(),
-      type: newPayType,
-      isActive: true,
-      requiresReference: newPayType === 'qris' ? false : newPayRef,
-      referenceLabel: newPayType === 'qris' ? '' : newPayRefLabel.trim(),
-      parentId: newPayType === 'qris' ? (qrisParent?.id ?? 'pm-qris') : null,
-      isGroup: false,
-    });
-    toast({
-      title: 'Metode pembayaran ditambahkan',
-      description: `${newPayName.trim()} berhasil ditambahkan.`,
-    });
-    setNewPayName('');
-    setNewPayIcon('');
-    setNewPayType('cash');
-    setNewPayRef(false);
-    setNewPayRefLabel('');
+    setIsAddingPayment(true);
     setPaymentError('');
+
+    try {
+      await addPaymentOption({
+        name: newPayName.trim(),
+        icon: newPayIcon.trim(),
+        type: newPayType,
+        isActive: true,
+        requiresReference: newPayType === 'qris' ? false : newPayRef,
+        referenceLabel: newPayType === 'qris' ? '' : newPayRefLabel.trim(),
+        parentId: newPayType === 'qris' ? (qrisParent?.id ?? 'pm-qris') : null,
+        isGroup: false,
+      });
+      toast({
+        title: 'Metode pembayaran ditambahkan',
+        description: `${newPayName.trim()} berhasil ditambahkan.`,
+      });
+      setNewPayName('');
+      setNewPayIcon('');
+      setNewPayType('cash');
+      setNewPayRef(false);
+      setNewPayRefLabel('');
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : 'Metode pembayaran gagal disimpan. Coba lagi.';
+      setPaymentError(message);
+      toast({
+        title: 'Gagal menambahkan metode pembayaran',
+        description: message,
+        variant: 'destructive',
+      });
+    } finally {
+      setIsAddingPayment(false);
+    }
   };
 
   const handleAddPackage = () => {
@@ -758,6 +775,7 @@ export default function AdminSettings() {
                         {(['cash', 'qris', 'transfer'] as const).map((type) => (
                           <button
                             key={type}
+                            type="button"
                             onClick={() => setNewPayType(type)}
                             className={cn(
                               'rounded-[12px] border px-2 py-2 text-xs font-semibold uppercase transition-colors',
@@ -771,6 +789,7 @@ export default function AdminSettings() {
                         ))}
                       </div>
                       <button
+                        type="button"
                         onClick={() => setNewPayRef((current) => !current)}
                         disabled={newPayType === 'qris'}
                         className={cn(
@@ -796,11 +815,13 @@ export default function AdminSettings() {
                         />
                       )}
                       <TabletActionButton
+                        type="button"
                         className="w-full"
+                        disabled={isAddingPayment}
                         onClick={handleAddPaymentOption}
                       >
                         <Plus className="h-4 w-4" />
-                        Tambah Metode
+                        {isAddingPayment ? 'Menyimpan...' : 'Tambah Metode'}
                       </TabletActionButton>
                     </div>
                   </div>

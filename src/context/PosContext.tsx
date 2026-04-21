@@ -477,7 +477,7 @@ export interface PosContextType {
   deleteShiftExpense: (expenseId: string, deleteReason: string) => Promise<void>;
   paymentOptions: PaymentOption[];
   activePaymentOptions: PaymentOption[];
-  addPaymentOption: (opt: Omit<PaymentOption, 'id'>) => void;
+  addPaymentOption: (opt: Omit<PaymentOption, 'id'>) => Promise<void>;
   updatePaymentOption: (id: string, updates: Partial<PaymentOption>) => void;
   deletePaymentOption: (id: string) => void;
   tableLayout: Record<number, TableLayoutPosition>;
@@ -1747,17 +1747,23 @@ export function PosProvider({ children }: { children: React.ReactNode }) {
 
   // ── Admin CRUD: Payment Options ────────────────────────────────────────────
 
-  const addPaymentOption = useCallback((opt: Omit<PaymentOption, 'id'>) => {
-    void (async () => {
-      try {
-        await api.addPaymentOptionApi({
-          name: opt.name, type: opt.type, icon: opt.icon, is_active: opt.isActive,
-          requires_reference: opt.requiresReference, reference_label: opt.referenceLabel,
-          parent_id: opt.parentId, is_group: opt.isGroup,
-        });
-        await refreshPaymentOptions();
-      } catch (e) { console.error('addPaymentOption failed:', e); }
-    })();
+  const addPaymentOption = useCallback(async (opt: Omit<PaymentOption, 'id'>) => {
+    try {
+      await api.addPaymentOptionApi({
+        name: opt.name,
+        type: opt.type,
+        icon: opt.icon,
+        is_active: opt.isActive,
+        requires_reference: opt.requiresReference,
+        reference_label: opt.referenceLabel,
+        parent_id: opt.parentId,
+        is_group: opt.isGroup,
+      });
+      await refreshPaymentOptions();
+    } catch (e) {
+      console.error('addPaymentOption failed:', e);
+      throw e;
+    }
   }, [refreshPaymentOptions]);
 
   const updatePaymentOption = useCallback((id: string, updates: Partial<PaymentOption>) => {

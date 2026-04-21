@@ -20,7 +20,9 @@ export async function apiRequest<T>(
 ): Promise<T> {
   const { authType = 'staff', ...fetchOptions } = options;
   const baseUrl = getApiBaseUrl();
-  const url = `${baseUrl}/${path.replace(/^\//, '')}`;
+  const url = path.startsWith('http://') || path.startsWith('https://') || path.startsWith('/api/')
+    ? path
+    : `${baseUrl}/${path.replace(/^\//, '')}`;
 
   const headers = new Headers(fetchOptions.headers);
   
@@ -41,8 +43,19 @@ export async function apiRequest<T>(
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.message || `API error: ${response.status}`);
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.message || `API error: ${response.status}`);
+    }
+
+    const errorText = await response.text().catch(() => '');
+    const compactMessage = errorText
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    throw new Error(compactMessage || `API error: ${response.status}`);
   }
 
   return response.json();
