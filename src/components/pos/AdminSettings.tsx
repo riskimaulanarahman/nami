@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { ChefHat, Plus, Printer, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react';
+import { ChefHat, Plus, Printer, RefreshCw, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react';
 import type { BusinessSettings, OrderHistory } from '@/context/PosContext';
 import { usePos } from '@/context/PosContext';
 import { useToast } from '@/hooks/use-toast';
@@ -16,14 +16,30 @@ import {
   TabletSectionHeader,
 } from './TabletPrimitives';
 
-type SettingsTab = 'business' | 'payments' | 'packages' | 'members';
+type SettingsTab = 'business' | 'payments' | 'packages' | 'members' | 'printer';
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
-  { id: 'business', label: 'Bisnis & Struk' },
+  { id: 'business', label: 'Bisnis' },
   { id: 'payments', label: 'Pembayaran' },
   { id: 'packages', label: 'Paket Jam' },
   { id: 'members', label: 'Membership' },
+  { id: 'printer', label: 'Printer' },
 ];
+
+type PrinterDevice = { name: string; address: string };
+
+type PrinterManagerEvent = CustomEvent<{
+  action: 'scan' | 'getSelected' | 'select';
+  ok: boolean;
+  devices?: PrinterDevice[];
+  address?: string | null;
+  name?: string | null;
+  message?: string;
+}>;
+
+interface NativePrinterManager {
+  postMessage: (message: string) => void;
+}
 
 function formatRupiah(amount: number): string {
   return new Intl.NumberFormat('id-ID', {
@@ -66,7 +82,66 @@ export default function AdminSettings() {
   const [paymentDeleteConfirm, setPaymentDeleteConfirm] = useState<string | null>(null);
   const [packageDeleteConfirm, setPackageDeleteConfirm] = useState<string | null>(null);
 
+  const [isNativeApp, setIsNativeApp] = useState(false);
+  const [printerScanning, setPrinterScanning] = useState(false);
+  const [printerDevices, setPrinterDevices] = useState<PrinterDevice[]>([]);
+  const [selectedPrinter, setSelectedPrinter] = useState<PrinterDevice | null>(null);
+  const [printerSelectingAddress, setPrinterSelectingAddress] = useState<string | null>(null);
+  const [printerFeedback, setPrinterFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+
   const autoSaveInitRef = useRef(true);
+
+  useEffect(() => {
+    const manager = (window as unknown as Record<string, NativePrinterManager | undefined>).POSPrinterManager;
+    if (manager) {
+      setIsNativeApp(true);
+      manager.postMessage(JSON.stringify({ action: 'getSelected' }));
+    }
+
+    const handler = (event: Event) => {
+      const { detail } = event as PrinterManagerEvent;
+      if (detail.action === 'scan') {
+        setPrinterScanning(false);
+        if (detail.ok && detail.devices) {
+          setPrinterDevices(detail.devices);
+        } else {
+          setPrinterFeedback({ ok: false, text: detail.message ?? 'Gagal scan printer.' });
+        }
+      } else if (detail.action === 'getSelected') {
+        if (detail.ok && detail.address && detail.name) {
+          setSelectedPrinter({ address: detail.address, name: detail.name });
+        }
+      } else if (detail.action === 'select') {
+        setPrinterSelectingAddress(null);
+        if (detail.ok && detail.address && detail.name) {
+          setSelectedPrinter({ address: detail.address, name: detail.name });
+          setPrinterFeedback({ ok: true, text: `${detail.name} berhasil dipilih.` });
+        } else {
+          setPrinterFeedback({ ok: false, text: detail.message ?? 'Gagal memilih printer.' });
+        }
+      }
+    };
+
+    window.addEventListener('pos-printer-manager-result', handler);
+    return () => window.removeEventListener('pos-printer-manager-result', handler);
+  }, []);
+
+  const handleScanPrinters = () => {
+    const manager = (window as unknown as Record<string, NativePrinterManager | undefined>).POSPrinterManager;
+    if (!manager) return;
+    setPrinterScanning(true);
+    setPrinterDevices([]);
+    setPrinterFeedback(null);
+    manager.postMessage(JSON.stringify({ action: 'scan' }));
+  };
+
+  const handleSelectPrinter = (address: string, name: string) => {
+    const manager = (window as unknown as Record<string, NativePrinterManager | undefined>).POSPrinterManager;
+    if (!manager) return;
+    setPrinterSelectingAddress(address);
+    setPrinterFeedback(null);
+    manager.postMessage(JSON.stringify({ action: 'select', address, name }));
+  };
 
   const updateFormDraft = (updater: (current: BusinessSettings) => BusinessSettings) => {
     setSaveStatus('saving');
@@ -448,163 +523,6 @@ export default function AdminSettings() {
                     }
                     className={inputClass}
                   />
-                </div>
-                <div>
-                  <label className={labelClass}>Ukuran Kertas</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {(['58mm', '80mm'] as const).map((size) => (
-                      <button
-                        key={size}
-                        onClick={() => updateFormDraft((current) => ({ ...current, paperSize: size }))}
-                        className={cn(
-                          'rounded-[12px] border px-3 py-2 text-sm font-semibold transition-colors',
-                          form.paperSize === size
-                            ? 'border-slate-950 bg-slate-950 text-white dark:border-white dark:bg-white dark:text-slate-950'
-                            : 'border-slate-200 bg-slate-50 text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400'
-                        )}
-                      >
-                        {size}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="col-span-2">
-                  <label className={labelClass}>Footer Struk</label>
-                  <textarea
-                    value={form.footerMessage}
-                    onChange={(event) =>
-                      updateFormDraft((current) => ({ ...current, footerMessage: event.target.value }))
-                    }
-                    rows={3}
-                    className={cn(inputClass, 'resize-none')}
-                    placeholder="Pesan terima kasih atau informasi promosi."
-                  />
-                </div>
-                <div className="col-span-2 rounded-[16px] border border-slate-200 bg-slate-50 p-3 dark:border-white/10 dark:bg-white/5">
-                  <p className="text-sm font-bold text-slate-950 dark:text-white">Pengaturan Print Struk</p>
-                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                    Atur elemen informasi yang ditampilkan pada struk cetak.
-                  </p>
-                  <div className="mt-3 space-y-2">
-                    {receiptPrintOptions.map((option) => {
-                      const active = form.receiptPrint[option.key];
-                      return (
-                        <button
-                          key={option.key}
-                          onClick={() =>
-                            updateFormDraft((current) => ({
-                              ...current,
-                              receiptPrint: {
-                                ...current.receiptPrint,
-                                [option.key]: !current.receiptPrint[option.key],
-                              },
-                            }))
-                          }
-                          className={cn(
-                            'flex w-full items-center justify-between rounded-[12px] border px-3 py-2 text-left transition-colors',
-                            active
-                              ? 'border-slate-200 bg-white dark:border-white/10 dark:bg-slate-950/70'
-                              : 'border-slate-200/60 bg-slate-100 dark:border-white/10 dark:bg-white/5'
-                          )}
-                        >
-                          <div className="min-w-0 pr-3">
-                            <p className="text-sm font-bold text-slate-950 dark:text-white">{option.label}</p>
-                            <p className="text-xs text-slate-500 dark:text-slate-400">{option.description}</p>
-                          </div>
-                          <span
-                            className={cn(
-                              'flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition-colors',
-                              active
-                                ? 'bg-slate-950 text-white dark:bg-white dark:text-slate-950'
-                                : 'bg-slate-200 text-slate-500 dark:bg-white/10 dark:text-slate-400'
-                            )}
-                          >
-                            {active ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3 rounded-[16px] bg-slate-50 p-4 dark:bg-white/5">
-                <div>
-                  <p className="text-sm font-bold text-slate-950 dark:text-white">Mode Cetak</p>
-                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                    Aktifkan mode struk kasir dan/atau dapur. Tiap mode bisa pakai ukuran kertas berbeda.
-                  </p>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {([
-                    { mode: 'cashier' as const, label: 'Struk Kasir', icon: <Printer className="h-4 w-4" />, color: 'blue' },
-                    { mode: 'kitchen' as const, label: 'Struk Dapur', icon: <ChefHat className="h-4 w-4" />, color: 'orange' },
-                  ] as const).map(({ mode, label, icon }) => {
-                    const modeSettings = form.printerSettings?.[mode] ?? { enabled: mode === 'cashier', paperSize: mode === 'cashier' ? '80mm' : '58mm' };
-                    return (
-                      <div key={mode} className="rounded-[12px] border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-slate-950/60">
-                        <div className="flex items-center justify-between mb-3">
-                          <div className="flex items-center gap-2">
-                            <span className="text-slate-500 dark:text-slate-400">{icon}</span>
-                            <p className="text-sm font-bold text-slate-950 dark:text-white">{label}</p>
-                          </div>
-                          <button
-                            onClick={() =>
-                              updateFormDraft((current) => ({
-                                ...current,
-                                printerSettings: {
-                                  ...current.printerSettings,
-                                  [mode]: { ...modeSettings, enabled: !modeSettings.enabled },
-                                },
-                              }))
-                            }
-                            className={cn(
-                              'flex h-7 w-7 items-center justify-center rounded-lg transition-colors',
-                              modeSettings.enabled
-                                ? 'bg-slate-950 text-white dark:bg-white dark:text-slate-950'
-                                : 'bg-slate-200 text-slate-500 dark:bg-white/10 dark:text-slate-400'
-                            )}
-                          >
-                            {modeSettings.enabled ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
-                          </button>
-                        </div>
-                        <div>
-                          <label className={labelClass}>Ukuran Kertas</label>
-                          <div className="flex gap-2">
-                            {(['58mm', '80mm'] as const).map((size) => (
-                              <button
-                                key={size}
-                                onClick={() =>
-                                  updateFormDraft((current) => ({
-                                    ...current,
-                                    printerSettings: {
-                                      ...current.printerSettings,
-                                      [mode]: { ...modeSettings, paperSize: size },
-                                    },
-                                  }))
-                                }
-                                className={cn(
-                                  'flex-1 rounded-lg border py-1.5 text-xs font-semibold transition-colors',
-                                  modeSettings.paperSize === size
-                                    ? 'border-slate-950 bg-slate-950 text-white dark:border-white dark:bg-white dark:text-slate-950'
-                                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-white/10 dark:bg-white/5 dark:text-slate-400'
-                                )}
-                              >
-                                {size}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                        <button
-                          onClick={mode === 'cashier' ? handlePrintTest : handlePrintKitchenTest}
-                          className="mt-3 w-full flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-400 dark:hover:bg-white/10"
-                        >
-                          {icon}
-                          Test Print {label}
-                        </button>
-                      </div>
-                    );
-                  })}
                 </div>
               </div>
             </TabletPanel>
@@ -1040,6 +958,296 @@ export default function AdminSettings() {
                   Tambah Paket
                 </TabletActionButton>
               </div>
+            </TabletPanel>
+          )}
+
+          {activeTab === 'printer' && (
+            <TabletPanel>
+              <TabletSectionHeader
+                title="Pengaturan Struk"
+                subtitle="Footer, elemen info, dan mode cetak kasir/dapur."
+              />
+
+              <div className="space-y-3">
+                <div>
+                  <label className={labelClass}>Footer Struk</label>
+                  <textarea
+                    value={form.footerMessage}
+                    onChange={(event) =>
+                      updateFormDraft((current) => ({ ...current, footerMessage: event.target.value }))
+                    }
+                    rows={3}
+                    className={cn(inputClass, 'resize-none')}
+                    placeholder="Pesan terima kasih atau informasi promosi."
+                  />
+                </div>
+
+                <div className="rounded-[16px] border border-slate-200 bg-slate-50 p-3 dark:border-white/10 dark:bg-white/5">
+                  <p className="text-sm font-bold text-slate-950 dark:text-white">Pengaturan Print Struk</p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    Atur elemen informasi yang ditampilkan pada struk cetak.
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    {receiptPrintOptions.map((option) => {
+                      const active = form.receiptPrint[option.key];
+                      return (
+                        <button
+                          key={option.key}
+                          onClick={() =>
+                            updateFormDraft((current) => ({
+                              ...current,
+                              receiptPrint: {
+                                ...current.receiptPrint,
+                                [option.key]: !current.receiptPrint[option.key],
+                              },
+                            }))
+                          }
+                          className={cn(
+                            'flex w-full items-center justify-between rounded-[12px] border px-3 py-2 text-left transition-colors',
+                            active
+                              ? 'border-slate-200 bg-white dark:border-white/10 dark:bg-slate-950/70'
+                              : 'border-slate-200/60 bg-slate-100 dark:border-white/10 dark:bg-white/5'
+                          )}
+                        >
+                          <div className="min-w-0 pr-3">
+                            <p className="text-sm font-bold text-slate-950 dark:text-white">{option.label}</p>
+                            <p className="text-xs text-slate-500 dark:text-slate-400">{option.description}</p>
+                          </div>
+                          <span
+                            className={cn(
+                              'flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition-colors',
+                              active
+                                ? 'bg-slate-950 text-white dark:bg-white dark:text-slate-950'
+                                : 'bg-slate-200 text-slate-500 dark:bg-white/10 dark:text-slate-400'
+                            )}
+                          >
+                            {active ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="rounded-[16px] bg-slate-50 p-4 dark:bg-white/5">
+                  <p className="text-sm font-bold text-slate-950 dark:text-white">Mode Cetak</p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    Aktifkan mode struk kasir dan/atau dapur. Tiap mode bisa pakai ukuran kertas berbeda.
+                  </p>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    {([
+                      { mode: 'cashier' as const, label: 'Struk Kasir', icon: <Printer className="h-4 w-4" /> },
+                      { mode: 'kitchen' as const, label: 'Struk Dapur', icon: <ChefHat className="h-4 w-4" /> },
+                    ] as const).map(({ mode, label, icon }) => {
+                      const modeSettings = form.printerSettings?.[mode] ?? { enabled: mode === 'cashier', paperSize: mode === 'cashier' ? '80mm' : '58mm' };
+                      return (
+                        <div key={mode} className="rounded-[12px] border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-slate-950/60">
+                          <div className="mb-3 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="text-slate-500 dark:text-slate-400">{icon}</span>
+                              <p className="text-sm font-bold text-slate-950 dark:text-white">{label}</p>
+                            </div>
+                            <button
+                              onClick={() =>
+                                updateFormDraft((current) => ({
+                                  ...current,
+                                  printerSettings: {
+                                    ...current.printerSettings,
+                                    [mode]: { ...modeSettings, enabled: !modeSettings.enabled },
+                                  },
+                                }))
+                              }
+                              className={cn(
+                                'flex h-7 w-7 items-center justify-center rounded-lg transition-colors',
+                                modeSettings.enabled
+                                  ? 'bg-slate-950 text-white dark:bg-white dark:text-slate-950'
+                                  : 'bg-slate-200 text-slate-500 dark:bg-white/10 dark:text-slate-400'
+                              )}
+                            >
+                              {modeSettings.enabled ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
+                            </button>
+                          </div>
+                          <div>
+                            <label className={labelClass}>Ukuran Kertas</label>
+                            <div className="flex gap-2">
+                              {(['58mm', '80mm'] as const).map((size) => (
+                                <button
+                                  key={size}
+                                  onClick={() =>
+                                    updateFormDraft((current) => ({
+                                      ...current,
+                                      printerSettings: {
+                                        ...current.printerSettings,
+                                        [mode]: { ...modeSettings, paperSize: size },
+                                      },
+                                    }))
+                                  }
+                                  className={cn(
+                                    'flex-1 rounded-lg border py-1.5 text-xs font-semibold transition-colors',
+                                    modeSettings.paperSize === size
+                                      ? 'border-slate-950 bg-slate-950 text-white dark:border-white dark:bg-white dark:text-slate-950'
+                                      : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-white/10 dark:bg-white/5 dark:text-slate-400'
+                                  )}
+                                >
+                                  {size}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          <button
+                            onClick={mode === 'cashier' ? handlePrintTest : handlePrintKitchenTest}
+                            className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-400 dark:hover:bg-white/10"
+                          >
+                            {icon}
+                            Test Print {label}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="my-2 border-t border-slate-200 dark:border-white/10" />
+
+              <TabletSectionHeader
+                title="Printer Bluetooth"
+                subtitle="Pilih printer thermal Bluetooth yang terhubung ke perangkat ini."
+              />
+
+              {!isNativeApp ? (
+                <div className="rounded-[16px] border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/5">
+                  <div className="flex items-start gap-3">
+                    <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-slate-200 text-slate-500 dark:bg-white/10 dark:text-slate-400">
+                      <Printer className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <p className="text-sm font-bold text-slate-950 dark:text-white">Fitur khusus aplikasi mobile</p>
+                      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                        Manajemen printer Bluetooth hanya tersedia saat diakses melalui aplikasi Flutter POS Wrapper.
+                        Buka halaman ini dari aplikasi untuk memilih printer.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {/* Printer aktif saat ini */}
+                  <div className="rounded-[16px] border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/5">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">
+                      Printer Aktif
+                    </p>
+                    {selectedPrinter ? (
+                      <div className="mt-2 flex items-center gap-3">
+                        <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400">
+                          <Printer className="h-4 w-4" />
+                        </span>
+                        <div>
+                          <p className="text-sm font-bold text-slate-950 dark:text-white">{selectedPrinter.name}</p>
+                          <p className="text-xs font-mono text-slate-500 dark:text-slate-400">{selectedPrinter.address}</p>
+                        </div>
+                        <span className="ml-auto rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
+                          Terhubung
+                        </span>
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">Belum ada printer yang dipilih.</p>
+                    )}
+                  </div>
+
+                  {/* Tombol scan */}
+                  <button
+                    onClick={handleScanPrinters}
+                    disabled={printerScanning}
+                    className={cn(
+                      'flex w-full items-center justify-center gap-2 rounded-[14px] border px-4 py-3 text-sm font-semibold transition-colors',
+                      printerScanning
+                        ? 'cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400 dark:border-white/10 dark:bg-white/5 dark:text-slate-500'
+                        : 'border-slate-950 bg-slate-950 text-white hover:bg-slate-800 dark:border-white dark:bg-white dark:text-slate-950 dark:hover:bg-slate-100'
+                    )}
+                  >
+                    <RefreshCw className={cn('h-4 w-4', printerScanning && 'animate-spin')} />
+                    {printerScanning ? 'Mencari printer…' : 'Scan Printer Bluetooth'}
+                  </button>
+
+                  {/* Feedback */}
+                  {printerFeedback && (
+                    <div
+                      className={cn(
+                        'rounded-[12px] border px-3 py-2 text-sm font-medium',
+                        printerFeedback.ok
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300'
+                          : 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300'
+                      )}
+                    >
+                      {printerFeedback.text}
+                    </div>
+                  )}
+
+                  {/* List device */}
+                  {printerDevices.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">
+                        Perangkat Ditemukan ({printerDevices.length})
+                      </p>
+                      {printerDevices.map((device) => {
+                        const isActive = selectedPrinter?.address === device.address;
+                        const isSelecting = printerSelectingAddress === device.address;
+                        return (
+                          <div
+                            key={device.address}
+                            className={cn(
+                              'flex items-center gap-3 rounded-[14px] border px-3 py-2.5 transition-colors',
+                              isActive
+                                ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-500/40 dark:bg-emerald-500/10'
+                                : 'border-slate-200 bg-white dark:border-white/10 dark:bg-white/5'
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                'flex h-8 w-8 shrink-0 items-center justify-center rounded-xl',
+                                isActive
+                                  ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400'
+                                  : 'bg-slate-100 text-slate-500 dark:bg-white/10 dark:text-slate-400'
+                              )}
+                            >
+                              <Printer className="h-4 w-4" />
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-bold text-slate-950 dark:text-white">{device.name}</p>
+                              <p className="text-xs font-mono text-slate-500 dark:text-slate-400">{device.address}</p>
+                            </div>
+                            {isActive ? (
+                              <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
+                                Aktif
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handleSelectPrinter(device.address, device.name)}
+                                disabled={isSelecting}
+                                className={cn(
+                                  'rounded-[10px] px-3 py-1.5 text-xs font-bold transition-colors',
+                                  isSelecting
+                                    ? 'cursor-not-allowed bg-slate-100 text-slate-400 dark:bg-white/5 dark:text-slate-500'
+                                    : 'bg-slate-950 text-white hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-100'
+                                )}
+                              >
+                                {isSelecting ? '…' : 'Pilih'}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {!printerScanning && printerDevices.length === 0 && !printerFeedback && (
+                    <p className="text-center text-xs text-slate-400 dark:text-slate-500">
+                      Tekan &quot;Scan Printer Bluetooth&quot; untuk mencari perangkat yang sudah dipair.
+                    </p>
+                  )}
+                </div>
+              )}
             </TabletPanel>
           )}
 
