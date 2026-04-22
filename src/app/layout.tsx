@@ -10,6 +10,33 @@ export const metadata: Metadata = {
   },
 };
 
+// Auto-reload when Next.js chunk load fails after a new deployment.
+// Uses sessionStorage to prevent infinite reload loops (max 3 attempts per session).
+const chunkErrorRecoveryScript = `
+(function(){
+  function isChunkError(msg) {
+    return msg && (msg.indexOf('ChunkLoadError') !== -1 || msg.indexOf('Loading chunk') !== -1 || msg.indexOf('Failed to load chunk') !== -1);
+  }
+  function tryReload() {
+    try {
+      var key = 'chunk_reload_count';
+      var count = parseInt(sessionStorage.getItem(key) || '0', 10);
+      if (count < 3) {
+        sessionStorage.setItem(key, String(count + 1));
+        window.location.reload();
+      }
+    } catch(e) {}
+  }
+  window.addEventListener('error', function(e) {
+    if (isChunkError(e.message)) tryReload();
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    var msg = e.reason && (e.reason.message || String(e.reason));
+    if (isChunkError(msg)) tryReload();
+  });
+})();
+`;
+
 // Inline script to normalize matchMedia APIs and prevent dark mode flash before React hydrates.
 const bootstrapScript = `
 (function(){
@@ -75,6 +102,7 @@ export default function RootLayout({
   return (
     <html lang="id" suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: chunkErrorRecoveryScript }} />
         <script dangerouslySetInnerHTML={{ __html: bootstrapScript }} />
       </head>
       <body
